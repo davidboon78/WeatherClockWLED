@@ -1,0 +1,4 @@
+{
+  "name": "tm1637_Display",
+  "build": { "libArchive": false }
+}

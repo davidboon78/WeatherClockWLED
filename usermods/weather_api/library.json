@@ -1,0 +1,5 @@
+{
+  "name": "weather_api",
+  "build": { "libArchive": false },
+  "dependencies": {}
+}

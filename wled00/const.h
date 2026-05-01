@@ -1,3 +1,4 @@
+#define USERMOD_ID_BASEBALL_API         62     //Usermod "usermod_baseball_api.h"
 #pragma once
 #ifndef WLED_CONST_H
 #define WLED_CONST_H
@@ -217,6 +218,9 @@ static_assert(WLED_MAX_BUSSES <= 32, "WLED_MAX_BUSSES exceeds hard limit");
 #define USERMOD_ID_RF433                 56     //Usermod "usermod_v2_RF433.h"
 #define USERMOD_ID_BRIGHTNESS_FOLLOW_SUN 57     //Usermod "usermod_v2_brightness_follow_sun.h"
 #define USERMOD_ID_USER_FX               58     //Usermod "user_fx"
+#define USERMOD_ID_TM1637_CLOCK          59     //Usermod "usermod_tm1637_clock.h"
+#define USERMOD_ID_WEATHER_API           60     //Usermod "usermod_weather_api.h"
+#define USERMOD_ID_TM1637_DISPLAY        61     //Usermod "usermod_tm1637_display.h"
 
 //Wifi encryption type
 #ifdef WLED_ENABLE_WPA_ENTERPRISE

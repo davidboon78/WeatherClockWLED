@@ -1,0 +1,6 @@
+{
+  "name": "baseball_api",
+  "build": { "libArchive": false },
+  "dependencies": [
+  ]
+}

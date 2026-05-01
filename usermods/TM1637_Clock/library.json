@@ -1,0 +1,4 @@
+{
+  "name": "TM1637_Clock",
+  "build": { "libArchive": false }
+}

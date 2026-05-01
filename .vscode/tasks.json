@@ -37,6 +37,27 @@
       "presentation": {
         "panel": "shared"
       }
+    },
+    {
+      "label": "Upload to WLED",
+      "type": "shell",
+      "command": "curl.exe -X POST http://192.168.2.133/update -F \"file=@.pio/build/nodemcuv3_custom/firmware.bin\" --max-time 120",
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "shared",
+        "reveal": "always"
+      }
+    },
+    {
+      "label": "Build binary & Upload to WLED",
+      "dependsOn": [
+        "Build: binary only",
+        "Upload to WLED"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": [
+        "$platformio"
+      ]
     }
   ]
 }
