@@ -164,7 +164,8 @@ class TM1637ClockUsermod : public Usermod {
       DEBUG_PRINTF("TM1637 Clock: weather condition_code=%d\n", _instance->weatherCondCode);
       if (_instance->weatherOverrideType > 0) {
   #ifdef USERMOD_BASEBALL_API
-          if (_instance->baseballApi && _instance->baseballApi->isGameOverrideActive()) return;
+          if (_instance->baseballApi && _instance->baseballApi->isGameLive() &&
+              _instance->baseballApi->isGameOverrideActive()) return;
   #endif
         _instance->applyWeatherLightPattern();
         _instance->lastPatternApply = millis();
@@ -335,7 +336,7 @@ class TM1637ClockUsermod : public Usermod {
       if (timeValid && weatherFetched && weatherOverrideType > 0 &&
           (nowMs - lastPatternApply > TM1637_PATTERN_APPLY_INTERVAL_MS)) {
       #ifdef USERMOD_BASEBALL_API
-        if (!baseballApi || !baseballApi->isGameOverrideActive()) {
+        if (!baseballApi || !baseballApi->isGameLive() || !baseballApi->isGameOverrideActive()) {
       #endif
         applyWeatherLightPattern();
         lastPatternApply = nowMs;
@@ -597,7 +598,8 @@ class TM1637ClockUsermod : public Usermod {
 
       #ifdef USERMOD_BASEBALL_API
         // Baseball game override takes priority — do not apply weather patterns while active
-        if (!ignoreBaseballOverride && baseballApi && baseballApi->isGameOverrideActive()) return;
+        if (!ignoreBaseballOverride && baseballApi && baseballApi->isGameLive() &&
+            baseballApi->isGameOverrideActive()) return;
       #endif
 
       if (weatherOverrideType == 1) {
