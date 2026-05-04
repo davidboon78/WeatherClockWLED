@@ -22,6 +22,43 @@
 
 	function S() {
 		getLoc();
+		const initScriptData = ()=>{
+			d.max_gpio = 50;
+			d.um_p = [];
+			d.rsvd = [];
+			d.ro_gpio = [];
+			d.extra = [];
+		};
+		const finalizeScriptData = ()=>{
+			for (let r of d.rsvd) { pins.push(r); pinO.push("rsvd"); } // reserved pins
+			if (d.um_p[0]==-1) d.um_p.shift();	// remove filler
+			d.Sf.SDA.max = d.Sf.SCL.max = d.Sf.MOSI.max = d.Sf.SCLK.max = d.Sf.MISO.max = d.max_gpio;
+			//for (let i of d.getElementsByTagName("input")) if (i.type === "number" && i.name.replace("[]","").substr(-3) === "pin") i.max = d.max_gpio;
+			pinDD(); // convert INPUT to SELECT for pins
+		};
+		const loadUmScriptWithRetry = (retriesLeft = 12, attempt = 1)=>{
+			const scE = d.createElement("script");
+			scE.setAttribute("src", getURL('/settings/s.js?p=8') + '&r=' + Date.now());
+			scE.setAttribute("type", "text/javascript");
+			scE.setAttribute("async", false);
+			d.body.appendChild(scE);
+			scE.addEventListener("load", ()=>{
+				initScriptData();
+				GetV();
+				finalizeScriptData();
+			});
+			scE.addEventListener("error", (ev)=>{
+				scE.remove();
+				if (retriesLeft > 0) {
+					const retryDelayMs = Math.min(2000, 200 * attempt);
+					setTimeout(()=>loadUmScriptWithRetry(retriesLeft - 1, attempt + 1), retryDelayMs);
+					return;
+				}
+				gId('lserr').style.display = "inline";
+				console.log("Error on loading usermod config script", ev);
+				alert("Loading of configuration script failed.\nIncomplete page data!");
+			});
+		};
 		// load settings and insert values into DOM
 		fetch(getURL('/json/cfg'), {
 			method: 'get'
@@ -43,19 +80,7 @@
 			}
 			if (urows==="") urows = "Usermods configuration not found.<br>Press <i>Save</i> to initialize defaults.";
 			gId("um").innerHTML = urows;
-			loadJS(getURL('/settings/s.js?p=8'), false, ()=>{
-				d.max_gpio = 50;
-				d.um_p = [];
-				d.rsvd = [];
-				d.ro_gpio = [];
-				d.extra = [];
-			}, ()=>{
-				for (let r of d.rsvd) { pins.push(r); pinO.push("rsvd"); } // reserved pins
-				if (d.um_p[0]==-1) d.um_p.shift();	// remove filler
-				d.Sf.SDA.max = d.Sf.SCL.max = d.Sf.MOSI.max = d.Sf.SCLK.max = d.Sf.MISO.max = d.max_gpio;
-				//for (let i of d.getElementsByTagName("input")) if (i.type === "number" && i.name.replace("[]","").substr(-3) === "pin") i.max = d.max_gpio;
-				pinDD(); // convert INPUT to SELECT for pins
-			});	// If we set async false, file is loaded and executed, then next statement is processed
+			loadUmScriptWithRetry();
 		})
 		.catch((error)=>{
 			gId('lserr').style.display = "inline";

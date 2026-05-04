@@ -17,4 +17,8 @@
  *   TM1637 GND -> GND
  */
 
+// Show a short 4-character message on the TM1637 display for a limited time.
+// Returns true when the message was accepted by the display usermod instance.
+bool tm1637DisplayShowMessage(const char* msg, uint16_t durationMs = 3000);
+
 #endif // USERMOD_TM1637_DISPLAY

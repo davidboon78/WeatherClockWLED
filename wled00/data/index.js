@@ -988,16 +988,19 @@ function populatePalettes()
 	gId('pallist').innerHTML=html;
 	// append custom palettes (when loading for the 1st time)
 	let li = lastinfo;
+	const customPaletteNames = (!isEmpty(li) && li.umcp) ? li.umcp : {};
 	if (!isEmpty(li) && li.cpalcount) {
 		for (let j = 0; j<li.cpalcount; j++) {
 			let div = d.createElement("div");
+			const paletteId = 255-j;
+			const paletteName = customPaletteNames[paletteId] || '~ Custom '+j+' ~';
 			gId('pallist').appendChild(div);
 			div.outerHTML = generateListItemHtml(
 				'palette',
-				255-j,
-				'~ Custom '+j+' ~',
+				paletteId,
+				paletteName,
 				'setPalette',
-				`<div class="lstIprev" style="${genPalPrevCss(255-j)}"></div>`
+				`<div class="lstIprev" style="${genPalPrevCss(paletteId)}"></div>`
 			);
 		}
 	}

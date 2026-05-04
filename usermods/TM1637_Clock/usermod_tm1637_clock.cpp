@@ -1,17 +1,9 @@
 
 #ifdef USERMOD_TM1637_CLOCK
-
-#ifndef TM1637DISPLAYUSERMOD_FWDDECL
-#define TM1637DISPLAYUSERMOD_FWDDECL
-// Minimal stub for TM1637DisplayUsermod to allow pointer usage in this file
-class TM1637DisplayUsermod {
-public:
-  void showMessage(const char*) {} // no-op stub
-};
-#endif
 #include "wled.h"
 #include "const.h"
 #include "../weather_api/weather_light_patterns.h"
+#include "../tm1637_Display/usermod_tm1637_display.h"
 #ifdef USERMOD_WEATHER_API
   #include "../weather_api/usermod_weather_api.h"
 #endif
@@ -34,10 +26,6 @@ public:
 // based on time or sensor updates)
 #define TM1637_PATTERN_APPLY_INTERVAL_MS 60000UL  // re-apply every 60 seconds
 
-#ifndef TM1637DISPLAYUSERMOD_FWDDECL
-#define TM1637DISPLAYUSERMOD_FWDDECL
-class TM1637DisplayUsermod;
-#endif
 #include "../baseball_api/usermod_baseball_api.h"
 
 class TM1637ClockUsermod : public Usermod {
@@ -77,57 +65,84 @@ class TM1637ClockUsermod : public Usermod {
     // Static instance pointer — set in setup() so subscription callbacks can access members.
     // Safe because TM1637ClockUsermod is a singleton (one instance via REGISTER_USERMOD).
     static TM1637ClockUsermod* _instance;
-    // Pointer to TM1637 display usermod (set in setup if available)
-    TM1637DisplayUsermod* tm1637Display = nullptr;
-
 
     // Pointer to Baseball API usermod (set in setup if available)
     UsermodBaseballAPI* baseballApi = nullptr;
 
-    // Show a status message on the TM1637 display (4 chars max)
-    void showStatusOnDisplay(const char* msg) {
-      if (tm1637Display && msg) {
-        tm1637Display->showMessage(msg);
-      }
-    }
-
     // Show a baseball score on the TM1637 display (favorite left, opponent right)
     void showBaseballScore(const String& fav, int favScore, const String& opp, int oppScore) {
-      if (!tm1637Display) return;
-      // Format: SS-SS (e.g., 3-2, 10-7)
+      // Format: D-D (single digit per side, fits 4-char TM1637)
       char buf[5];
-      if (favScore < 10 && oppScore < 10) {
-        snprintf(buf, sizeof(buf), "%d-%d", favScore, oppScore);
-      } else {
-        // For double-digit scores, show last digit only
-        snprintf(buf, sizeof(buf), "%d-%d", favScore % 10, oppScore % 10);
-      }
-      tm1637Display->showMessage(buf);
+      uint8_t favDigit = (uint8_t)(((favScore < 0) ? 0 : favScore) % 10);
+      uint8_t oppDigit = (uint8_t)(((oppScore < 0) ? 0 : oppScore) % 10);
+      snprintf(buf, sizeof(buf), "%u-%u", favDigit, oppDigit);
+      DEBUG_PRINTF("TM1637 Clock: MLB showBaseballScore fav=%s(%d) opp=%s(%d) text=%s\n",
+        fav.c_str(), favScore, opp.c_str(), oppScore, buf);
+      tm1637DisplayShowMessage(buf, 3000);
     }
 
-    // Helper to parse lastScore string and extract team names and scores (single favorite)
+    // Helper to parse lastScore string and extract team names and scores.
+    // Supports both:
+    //  1) "Yankees vs Red Sox: 3-2 (LIVE)"
+    //  2) "Yankees 3 @ Red Sox 2"
+    // If favorite team does not match either side (e.g. stored as numeric style ID),
+    // falls back to displaying away-vs-home scores.
     bool parseBaseballScore(const String& lastScore, const String& favTeam, String& fav, int& favScore, String& opp, int& oppScore) {
-      // Example: "Yankees vs Red Sox: 3-2 (LIVE)"
+      // Legacy format: "Home vs Away: H-A (STATE)"
       int vsIdx = lastScore.indexOf(" vs ");
       int colonIdx = lastScore.indexOf(": ");
       int dashIdx = lastScore.indexOf("-");
-      if (vsIdx < 0 || colonIdx < 0 || dashIdx < 0) return false;
-      String home = lastScore.substring(0, vsIdx);
-      String away = lastScore.substring(vsIdx + 4, colonIdx);
-      String scorePart = lastScore.substring(colonIdx + 2, lastScore.indexOf(" ", colonIdx + 2));
-      int dash = scorePart.indexOf("-");
-      if (dash < 0) return false;
-      int homeScore = scorePart.substring(0, dash).toInt();
-      int awayScore = scorePart.substring(dash + 1).toInt();
-      // Determine which is favorite
+      if (vsIdx >= 0 && colonIdx >= 0 && dashIdx >= 0) {
+        String home = lastScore.substring(0, vsIdx);
+        String away = lastScore.substring(vsIdx + 4, colonIdx);
+        int scoreEnd = lastScore.indexOf(" ", colonIdx + 2);
+        if (scoreEnd < 0) scoreEnd = lastScore.length();
+        String scorePart = lastScore.substring(colonIdx + 2, scoreEnd);
+        int dash = scorePart.indexOf("-");
+        if (dash >= 0) {
+          int homeScore = scorePart.substring(0, dash).toInt();
+          int awayScore = scorePart.substring(dash + 1).toInt();
+          if (home.equalsIgnoreCase(favTeam)) {
+            fav = home; favScore = homeScore; opp = away; oppScore = awayScore;
+            return true;
+          }
+          if (away.equalsIgnoreCase(favTeam)) {
+            fav = away; favScore = awayScore; opp = home; oppScore = homeScore;
+            return true;
+          }
+          // Fallback when favorite team does not match by name
+          fav = away; favScore = awayScore; opp = home; oppScore = homeScore;
+          return true;
+        }
+      }
+
+      // New format: "Away A @ Home H"
+      int atIdx = lastScore.indexOf(" @ ");
+      if (atIdx < 0) return false;
+
+      String awayPart = lastScore.substring(0, atIdx);
+      String homePart = lastScore.substring(atIdx + 3);
+      int awaySplit = awayPart.lastIndexOf(' ');
+      int homeSplit = homePart.lastIndexOf(' ');
+      if (awaySplit <= 0 || homeSplit <= 0) return false;
+
+      String away = awayPart.substring(0, awaySplit);
+      int awayScore = awayPart.substring(awaySplit + 1).toInt();
+      String home = homePart.substring(0, homeSplit);
+      int homeScore = homePart.substring(homeSplit + 1).toInt();
+
       if (home.equalsIgnoreCase(favTeam)) {
         fav = home; favScore = homeScore; opp = away; oppScore = awayScore;
         return true;
-      } else if (away.equalsIgnoreCase(favTeam)) {
+      }
+      if (away.equalsIgnoreCase(favTeam)) {
         fav = away; favScore = awayScore; opp = home; oppScore = homeScore;
         return true;
       }
-      return false;
+
+      // Fallback when favorite team is an ID instead of a full name.
+      fav = away; favScore = awayScore; opp = home; oppScore = homeScore;
+      return true;
     }
 
 #ifdef USERMOD_WEATHER_API
@@ -148,6 +163,9 @@ class TM1637ClockUsermod : public Usermod {
       _instance->weatherFetched  = true;
       DEBUG_PRINTF("TM1637 Clock: weather condition_code=%d\n", _instance->weatherCondCode);
       if (_instance->weatherOverrideType > 0) {
+  #ifdef USERMOD_BASEBALL_API
+          if (_instance->baseballApi && _instance->baseballApi->isGameOverrideActive()) return;
+  #endif
         _instance->applyWeatherLightPattern();
         _instance->lastPatternApply = millis();
       }
@@ -265,9 +283,8 @@ class TM1637ClockUsermod : public Usermod {
       }
 #endif
 
-      // Try to find TM1637 display usermod (replace USERMOD_ID_TM1637_DISPLAY with actual ID)
-      tm1637Display = (TM1637DisplayUsermod*)UsermodManager::lookup(USERMOD_ID_TM1637_DISPLAY);
-      if (!tm1637Display) {
+      // Check for TM1637 display usermod availability.
+      if (!UsermodManager::lookup(USERMOD_ID_TM1637_DISPLAY)) {
         DEBUG_PRINTLN(F("TM1637 Clock: TM1637 display usermod not found"));
       }
 
@@ -281,64 +298,99 @@ class TM1637ClockUsermod : public Usermod {
     void loop() override {
       static unsigned long lastWeatherCycleEnd = 0;
       static bool baseballShown = false;
+      static unsigned long lastGateLogMs = 0;
+      unsigned long nowMs = millis();
 
       if (!enabled) {
-        showStatusOnDisplay("OFF");
+        if (nowMs - lastGateLogMs > 5000) {
+          DEBUG_PRINTLN(F("TM1637 Clock: MLB gate blocked (TM1637Clock disabled)"));
+          lastGateLogMs = nowMs;
+        }
         return;
       }
 
       // Check WiFi
       if (WiFi.status() != WL_CONNECTED) {
-        showStatusOnDisplay("WIFI");
+        if (nowMs - lastGateLogMs > 5000) {
+          DEBUG_PRINTF("TM1637 Clock: MLB gate blocked (WiFi status=%d)\n", WiFi.status());
+          lastGateLogMs = nowMs;
+        }
         return;
       }
 
-      // Check time (assume time is valid if year > 2020)
-      time_t nowT = time(nullptr);
-      struct tm* tmNow = localtime(&nowT);
-      if (!tmNow || tmNow->tm_year + 1900 < 2021) {
-        showStatusOnDisplay("TIME");
-        return;
+      // Check time using WLED's internal synced clock (localTime/toki).
+      // Using libc time(nullptr) can report 1970 even when WLED time is valid.
+      updateLocalTime();
+      bool timeValid = (localTime >= 1704067200UL && localTime < 4102444800UL); // 2024-01-01 .. 2100-01-01
+      if (!timeValid) {
+        if (nowMs - lastGateLogMs > 5000) {
+          DEBUG_PRINTF("TM1637 Clock: MLB gate blocked (WLED time not valid, localTime=%lu toki=%lu)\n",
+            (unsigned long)localTime, (unsigned long)toki.second());
+          lastGateLogMs = nowMs;
+        }
       }
 
-      // Check weather
-      if (!weatherFetched) {
-        showStatusOnDisplay("WEAT");
-        return;
-      }
-
-      // All good, clear status (optionally show temp or nothing)
-      showStatusOnDisplay("");
-
-      unsigned long nowMs = millis();
+      // Check weather — TM1637_Display already shows time; just skip LED/score logic until ready
       // Re-apply weather-driven LED patterns periodically (every 60s)
-      if (weatherOverrideType > 0 && weatherFetched &&
+      if (timeValid && weatherFetched && weatherOverrideType > 0 &&
           (nowMs - lastPatternApply > TM1637_PATTERN_APPLY_INTERVAL_MS)) {
+      #ifdef USERMOD_BASEBALL_API
+        if (!baseballApi || !baseballApi->isGameOverrideActive()) {
+      #endif
         applyWeatherLightPattern();
         lastPatternApply = nowMs;
+      #ifdef USERMOD_BASEBALL_API
+        }
+      #endif
       }
 
-      // After weather display cycle, show baseball score for 3 seconds if live
-      // Assume weather display cycle is 6 seconds (2x3s: temp + condition)
-      if (tm1637Display && baseballApi && baseballApi->isGameLive() && baseballApi->getLastScore().length() > 0) {
-        if (!baseballShown && (nowMs - lastWeatherCycleEnd > 6000)) {
-          // Parse and display score
-          String fav, opp;
-          int favScore = 0, oppScore = 0;
-          if (parseBaseballScore(baseballApi->getLastScore(), baseballApi->getFavoriteTeam(), fav, favScore, opp, oppScore)) {
-            showBaseballScore(fav, favScore, opp, oppScore);
-            baseballShown = true;
+      if(baseballApi){
+        if( baseballApi->isGameLive()){
+          if (baseballApi->getLastScore().length() > 0) {
+            if (!baseballShown && (nowMs - lastWeatherCycleEnd > 6000)) {
+              // Parse and display score
+              String fav, opp;
+              int favScore = 0, oppScore = 0;
+              if (parseBaseballScore(baseballApi->getLastScore(), baseballApi->getFavoriteTeam(), fav, favScore, opp, oppScore)) {
+                showBaseballScore(fav, favScore, opp, oppScore);
+                DEBUG_PRINTF("TM1637 Clock: MLB displayed live score %s %d vs %s %d (raw='%s')\n",
+                  fav.c_str(), favScore, opp.c_str(), oppScore, baseballApi->getLastScore().c_str());
+                baseballShown = true;
+                lastWeatherCycleEnd = nowMs;
+              } else {
+                // Parse failed: show a visible failure marker on the 4-digit display.
+                // "----" maps cleanly to TM1637 segments and is unambiguous.
+                DEBUG_PRINTF("TM1637 Clock: MLB parseBaseballScore failed, raw='%s' fav='%s'\n",
+                  baseballApi->getLastScore().c_str(), baseballApi->getFavoriteTeam().c_str());
+                tm1637DisplayShowMessage("----", 3000);
+                DEBUG_PRINTLN(F("TM1637 Clock: MLB displayed parse-failure marker ----"));
+                baseballShown = true;
+                lastWeatherCycleEnd = nowMs;
+              }
+            } else if (baseballShown && (nowMs - lastWeatherCycleEnd > 9000)) {
+              // 3 seconds passed, reset
+              baseballShown = false;
+              lastWeatherCycleEnd = nowMs;
+              DEBUG_PRINTLN(F("TM1637 Clock: MLB reset baseball score display after 3s"));
+            }
+          } else {
+            baseballShown = false;
             lastWeatherCycleEnd = nowMs;
+            DEBUG_PRINTLN(F("TM1637 Clock: MLB live game but no score available yet, skipping display") );
           }
-        } else if (baseballShown && (nowMs - lastWeatherCycleEnd > 9000)) {
-          // 3 seconds passed, reset
-          baseballShown = false;
-          lastWeatherCycleEnd = nowMs;
+        }else{
+          
+         // DEBUG_PRINTLN(F("TM1637 Clock: MLB no live game, skipping baseball score display") );
         }
-      } else {
-        baseballShown = false;
-        lastWeatherCycleEnd = nowMs;
+        // Show baseball score on TM1637 when a game is live (independent of weather)
+        
+      }else{
+        if (nowMs - lastGateLogMs > 5000) {
+          DEBUG_PRINTLN(F("TM1637 Clock: MLB gate blocked (Baseball API usermod lookup returned null)"));
+          lastGateLogMs = nowMs;
+        }
       }
+      
     }
 
 
@@ -421,12 +473,11 @@ class TM1637ClockUsermod : public Usermod {
     void appendConfigData() override {
       // Weather override hint
       oappend(SET_F("addInfo('TM1637Clock:enabled',1,'Enable weather-driven LED control');"));
-      // Override type: hidden dropdown as data store, replaced with radio buttons via JS
-      oappend(SET_F("dd=addDropdown('TM1637Clock','override-type');"));
+      // Keep settings UI script minimal to improve reliability on constrained devices.
+      oappend(SET_F("var dd=addDropdown('TM1637Clock','override-type');"));
       oappend(SET_F("addOption(dd,'No override',0);"));
       oappend(SET_F("addOption(dd,'Light pattern',1);"));
       oappend(SET_F("addOption(dd,'Color palette',2);"));
-      // Light pattern mode dropdown (shown when override-type == 1)
       oappend(SET_F("dd=addDropdown('TM1637Clock','light-mode');"));
       oappend(SET_F("addOption(dd,'Condition only',0);"));
       oappend(SET_F("addOption(dd,'Temperature only',1);"));
@@ -435,14 +486,12 @@ class TM1637ClockUsermod : public Usermod {
       oappend(SET_F("addOption(dd,'Condition + Time of day',4);"));
       oappend(SET_F("addOption(dd,'Temperature + Time of day',5);"));
       oappend(SET_F("addOption(dd,'All (Condition + Temp + Time)',6);"));
-      // Condition preset overrides (shown when override-type == 1)
       oappend(SET_F("addInfo('TM1637Clock:preset-clear',1,'WLED preset # for Clear/Sunny (0=off)');"));
       oappend(SET_F("addInfo('TM1637Clock:preset-cloudy',1,'WLED preset # for Cloudy/Overcast (0=off)');"));
       oappend(SET_F("addInfo('TM1637Clock:preset-fog',1,'WLED preset # for Fog/Mist (0=off)');"));
       oappend(SET_F("addInfo('TM1637Clock:preset-thunder',1,'WLED preset # for Thunder/Storm (0=off)');"));
       oappend(SET_F("addInfo('TM1637Clock:preset-snow',1,'WLED preset # for Snow/Ice (0=off)');"));
       oappend(SET_F("addInfo('TM1637Clock:preset-rain',1,'WLED preset # for Rain/Drizzle (0=off)');"));
-      // Color palette mode dropdown (shown when override-type == 2)
       oappend(SET_F("dd=addDropdown('TM1637Clock','palette-mode');"));
       oappend(SET_F("addOption(dd,'Condition only',0);"));
       oappend(SET_F("addOption(dd,'Temperature only',1);"));
@@ -451,28 +500,16 @@ class TM1637ClockUsermod : public Usermod {
       oappend(SET_F("addOption(dd,'Condition + Time of day',4);"));
       oappend(SET_F("addOption(dd,'Temperature + Time of day',5);"));
       oappend(SET_F("addOption(dd,'All (Condition + Temp + Time)',6);"));
-      // Replace override-type dropdown with radio buttons; wire show/hide for dependent fields
-      oappend(SET_F("(function(){"));
-      oappend(SET_F("var sel=document.getElementById('TM1637Clock_override-type');if(!sel)return;"));
-      oappend(SET_F("var par=sel.parentNode;var div=document.createElement('div');div.style.margin='4px 0';"));
-      oappend(SET_F("[['No override','0'],['Light pattern','1'],['Color palette','2']].forEach(function(o){"));
-      oappend(SET_F("var l=document.createElement('label');l.style.cssText='margin-right:14px;cursor:pointer;';"));
-      oappend(SET_F("var r=document.createElement('input');r.type='radio';r.name='TM1637Clock_ov_r';r.value=o[1];"));
-      oappend(SET_F("if(sel.value===o[1])r.checked=true;"));
-      oappend(SET_F("r.addEventListener('change',function(){sel.value=this.value;upd();});"));
-      oappend(SET_F("l.appendChild(r);l.appendChild(document.createTextNode(' '+o[0]));div.appendChild(l);});"));
-      oappend(SET_F("par.insertBefore(div,sel.nextSibling);sel.style.display='none';"));
-      oappend(SET_F("var lmIds=['TM1637Clock_light-mode','TM1637Clock_preset-clear','TM1637Clock_preset-cloudy',"));
-      oappend(SET_F("'TM1637Clock_preset-fog','TM1637Clock_preset-thunder','TM1637Clock_preset-snow','TM1637Clock_preset-rain'];"));
-      oappend(SET_F("function upd(){var v=sel.value;"));
-      oappend(SET_F("lmIds.forEach(function(i){var e=document.getElementById(i);if(e&&e.parentNode)e.parentNode.style.display=(v==='1')?'':'none';});"));
-      oappend(SET_F("var pm=document.getElementById('TM1637Clock_palette-mode');if(pm&&pm.parentNode)pm.parentNode.style.display=(v==='2')?'':'none';}"));
-      oappend(SET_F("upd();})();"));
      
     }
 
     void applyWeatherLightPattern() {
       int h = hour(localTime);
+
+      #ifdef USERMOD_BASEBALL_API
+        // Baseball game override takes priority — do not apply weather patterns while active
+        if (baseballApi && baseballApi->isGameOverrideActive()) return;
+      #endif
 
       if (weatherOverrideType == 1) {
         // Condition preset override takes priority over weather pattern mode

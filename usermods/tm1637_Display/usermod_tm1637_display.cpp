@@ -1,9 +1,13 @@
 #include "wled.h"
 #ifdef USERMOD_TM1637_DISPLAY
 #include <TM1637Display.h>
+#include "usermod_tm1637_display.h"
 #ifdef USERMOD_WEATHER_API
   #include "../weather_api/usermod_weather_api.h"
 #endif
+
+class TM1637DisplayUsermod;
+static TM1637DisplayUsermod* g_tm1637DisplayInstance = nullptr;
 
 /*
  * TM1637 Display Usermod
@@ -75,6 +79,8 @@ class TM1637DisplayUsermod : public Usermod {
 
     DisplayState currentState = NO_WIFI;
     DisplayState lastState    = SHOW_TIME;  // Force initial update
+    char overrideMessage[5]   = {0, 0, 0, 0, 0};
+    unsigned long overrideUntil = 0;
 
     // Pre-built 7-segment patterns for status messages
     const uint8_t MSG_NO_WIFI[4]     = {0x00, 0x00, 0x00, 0x00};  // "    " blank
@@ -196,6 +202,14 @@ class TM1637DisplayUsermod : public Usermod {
     }
 
   public:
+    bool showMessage(const char* msg, uint16_t durationMs = 3000) {
+      if (!msg || !initDone || !display) return false;
+      strncpy(overrideMessage, msg, sizeof(overrideMessage) - 1);
+      overrideMessage[sizeof(overrideMessage) - 1] = '\0';
+      overrideUntil = millis() + durationMs;
+      return true;
+    }
+
     void setup() override {
       // Clean up any previous initialisation (e.g. after OTA) to avoid leaking
       // the old TM1637Display heap object and its reserved pins.
@@ -222,6 +236,8 @@ class TM1637DisplayUsermod : public Usermod {
         DEBUG_PRINTLN(F("TM1637 Display: Failed to allocate pins"));
       }
 
+      g_tm1637DisplayInstance = this;
+
 #ifdef USERMOD_WEATHER_API
       _instance = this;
       auto* wapi = (WeatherApiUsermod*)UsermodManager::lookup(USERMOD_ID_WEATHER_API);
@@ -239,6 +255,23 @@ class TM1637DisplayUsermod : public Usermod {
       if (!enabled || !initDone || !display) return;
 
       unsigned long now = millis();
+
+      if (overrideMessage[0] != '\0' && (long)(overrideUntil - now) > 0) {
+        uint8_t segs[4] = {0, 0, 0, 0};
+        for (uint8_t i = 0; i < 4; i++) {
+          char c = overrideMessage[i];
+          if (c == '\0' || c == ' ') segs[i] = 0x00;
+          else if (c >= '0' && c <= '9') segs[i] = display->encodeDigit(c - '0');
+          else if (c == '-') segs[i] = 0x40;
+          else segs[i] = 0x00;
+        }
+        display->setSegments(segs);
+        return;
+      }
+
+      if (overrideMessage[0] != '\0' && (long)(overrideUntil - now) <= 0) {
+        overrideMessage[0] = '\0';
+      }
 
       // Poll display state every 100 ms for responsiveness
       if (now - lastUpdate > 100) {
@@ -371,6 +404,7 @@ class TM1637DisplayUsermod : public Usermod {
       if (toki.getTime().sec != 0) {
         int currentHour   = hour(localTime);
         int currentMinute = minute(localTime);
+        static int lastLoggedMinute = -1;
 
         // Convert to 12-hour format
         if (currentHour == 0)       currentHour = 12;
@@ -378,6 +412,10 @@ class TM1637DisplayUsermod : public Usermod {
 
         int timeValue = currentHour * 100 + currentMinute;
         display->showNumberDecEx(timeValue, blinkColon ? 0b01000000 : 0b00000000, true);
+        if (currentMinute != lastLoggedMinute) {
+          DEBUG_PRINTF("TM1637 Display: showing time %02d:%02d\n", currentHour, currentMinute);
+          lastLoggedMinute = currentMinute;
+        }
       } else {
         const uint8_t dashes[4] = {0x40, 0x40, 0x40, 0x40};  // "----"
         display->setSegments(dashes);
@@ -576,5 +614,10 @@ const char TM1637DisplayUsermod::_brightness[] PROGMEM = "brightness";
 // Create and register the usermod instance
 static TM1637DisplayUsermod tm1637Display;
 REGISTER_USERMOD(tm1637Display);
+
+bool tm1637DisplayShowMessage(const char* msg, uint16_t durationMs) {
+  if (!g_tm1637DisplayInstance) return false;
+  return g_tm1637DisplayInstance->showMessage(msg, durationMs);
+}
 
 #endif // USERMOD_TM1637_DISPLAY
