@@ -403,22 +403,111 @@ class TM1637ClockUsermod : public Usermod {
     void addToJsonInfo(JsonObject& root) override {
       JsonObject user = root["u"];
       if (user.isNull()) user = root.createNestedObject("u");
-      
-      JsonArray tm1637 = user.createNestedArray(FPSTR(_name));
-      
-      if (enabled) {
-        if (weatherFetched) {
-          char tBuf[8]; dtostrf(weatherTempCached, 4, 1, tBuf);
-          char wBuf[48];
-          snprintf(wBuf, sizeof(wBuf), "LED: %s C  %s", tBuf, conditionDescription(weatherCondCode));
-          tm1637.add(wBuf);
-        } else if (WiFi.status() == WL_CONNECTED) {
-          tm1637.add("Weather: fetching...");
+      JsonArray arr = user.createNestedArray(FPSTR(_name));
+
+      if (!enabled)                          { arr.add(F("Disabled")); return; }
+      if (WiFi.status() != WL_CONNECTED)     { arr.add(F("No WiFi"));  return; }
+      if (!weatherFetched)                   { arr.add(F("Weather: fetching...")); return; }
+
+      // Keep /json/info compact. The generic info page renders usermod info as a
+      // single summary row, so detailed diagnostics belong in /json/state.
+      char tBuf[8]; dtostrf(weatherTempCached, 4, 1, tBuf);
+      char buf[96];
+      const char* modeSummary = "Off";
+      if (weatherOverrideType == 1) {
+        uint8_t cat    = conditionToCategory(weatherCondCode);
+        uint8_t preset = conditionPresetOverrides[cat];
+        static const char* const _modeNames[] = {
+          "Condition", "Temperature", "Time of day",
+          "Cond+Temp", "Cond+Time",  "Temp+Time", "All"
+        };
+        if (preset > 0) {
+          snprintf(buf, sizeof(buf), "%s C %s | Preset #%u", tBuf, conditionDescription(weatherCondCode), preset);
         } else {
-          tm1637.add("Weather: no WiFi");
+          modeSummary = weatherPatternMode < 7 ? _modeNames[weatherPatternMode] : "All";
+          snprintf(buf, sizeof(buf), "%s C %s | Pattern %s", tBuf, conditionDescription(weatherCondCode), modeSummary);
         }
+      } else if (weatherOverrideType == 2) {
+        static const char* const _palModeNames[] = {
+          "Condition", "Temperature", "Time of day",
+          "Cond+Temp", "Cond+Time",  "Temp+Time", "All"
+        };
+        modeSummary = weatherPaletteMode < 7 ? _palModeNames[weatherPaletteMode] : "All";
+        snprintf(buf, sizeof(buf), "%s C %s | Palette %s", tBuf, conditionDescription(weatherCondCode), modeSummary);
       } else {
-        tm1637.add("Disabled");
+        snprintf(buf, sizeof(buf), "%s C %s | No override", tBuf, conditionDescription(weatherCondCode));
+      }
+      arr.add(buf);
+    }
+
+    // Expose current weather state in GET /json/state response.
+    void addToJsonState(JsonObject& root) override {
+      JsonObject top = root.createNestedObject("TM1637Clock");
+      top["enabled"]      = enabled;
+      top["fetched"]      = weatherFetched;
+      top["condCode"]     = weatherCondCode;
+      top["condDesc"]     = conditionDescription(weatherCondCode);
+      top["tempC"]        = weatherTempCached;
+      top["overrideType"] = weatherOverrideType;
+      top["patternMode"]  = weatherPatternMode;
+      top["paletteMode"]  = weatherPaletteMode;
+      uint8_t cat         = conditionToCategory(weatherCondCode);
+      top["condCategory"] = cat;
+      top["condPreset"]   = conditionPresetOverrides[cat];
+    }
+
+    // Accept test commands via POST /json/state.
+    // Example: {"TM1637Clock":{"testCode":1276,"testTemp":5.0,"overrideType":1,"patternMode":6,"reapply":true,"forceApply":true}}
+    //   testCode      — inject a WeatherAPI condition code (without waiting for a real fetch)
+    //   testTemp      — inject a temperature in °C
+    //   overrideType  — 0=none, 1=light pattern, 2=color palette
+    //   patternMode   — 0..6 for weather-driven light patterns
+    //   paletteMode   — 0..6 for weather-driven palettes
+    //   preset-*      — per-category preset overrides (same names as config keys)
+    //   reapply       — immediately re-apply the current (or just-injected) weather pattern
+    //   forceApply    — bypass baseball override once for explicit API testing
+    void readFromJsonState(JsonObject& root) override {
+      JsonObject top = root["TM1637Clock"];
+      if (top.isNull()) return;
+
+      if (!top["enabled"].isNull()) {
+        enabled = top["enabled"].as<bool>();
+      }
+      if (!top["overrideType"].isNull()) {
+        uint8_t value = top["overrideType"].as<uint8_t>();
+        weatherOverrideType = (value <= 2) ? value : weatherOverrideType;
+      }
+      if (!top["patternMode"].isNull()) {
+        uint8_t value = top["patternMode"].as<uint8_t>();
+        weatherPatternMode = (value <= 6) ? value : weatherPatternMode;
+      }
+      if (!top["paletteMode"].isNull()) {
+        uint8_t value = top["paletteMode"].as<uint8_t>();
+        weatherPaletteMode = (value <= 6) ? value : weatherPaletteMode;
+      }
+      if (!top["preset-clear"].isNull())   conditionPresetOverrides[0] = top["preset-clear"].as<uint8_t>();
+      if (!top["preset-cloudy"].isNull())  conditionPresetOverrides[1] = top["preset-cloudy"].as<uint8_t>();
+      if (!top["preset-fog"].isNull())     conditionPresetOverrides[2] = top["preset-fog"].as<uint8_t>();
+      if (!top["preset-thunder"].isNull()) conditionPresetOverrides[3] = top["preset-thunder"].as<uint8_t>();
+      if (!top["preset-snow"].isNull())    conditionPresetOverrides[4] = top["preset-snow"].as<uint8_t>();
+      if (!top["preset-rain"].isNull())    conditionPresetOverrides[5] = top["preset-rain"].as<uint8_t>();
+
+      if (!top["testCode"].isNull()) {
+        weatherCondCode = top["testCode"].as<int>();
+        weatherFetched  = true;
+        DEBUG_PRINTF("TM1637 Clock: testCode injected=%d\n", weatherCondCode);
+      }
+      if (!top["testTemp"].isNull()) {
+        weatherTempCached = top["testTemp"].as<float>();
+        weatherFetched    = true;
+        DEBUG_PRINTF("TM1637 Clock: testTemp injected=%.1f\n", (double)weatherTempCached);
+      }
+      bool reapply = top["reapply"] | false;
+      bool forceApply = top["forceApply"] | false;
+      if (reapply && weatherFetched && weatherOverrideType > 0) {
+        applyWeatherLightPattern(forceApply);
+        lastPatternApply = millis();
+        DEBUG_PRINTF("TM1637 Clock: forced reapply via JSON state (forceApply=%d)\n", forceApply);
       }
     }
 
@@ -503,12 +592,12 @@ class TM1637ClockUsermod : public Usermod {
      
     }
 
-    void applyWeatherLightPattern() {
+    void applyWeatherLightPattern(bool ignoreBaseballOverride = false) {
       int h = hour(localTime);
 
       #ifdef USERMOD_BASEBALL_API
         // Baseball game override takes priority — do not apply weather patterns while active
-        if (baseballApi && baseballApi->isGameOverrideActive()) return;
+        if (!ignoreBaseballOverride && baseballApi && baseballApi->isGameOverrideActive()) return;
       #endif
 
       if (weatherOverrideType == 1) {
