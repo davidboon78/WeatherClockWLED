@@ -26,7 +26,9 @@
 // based on time or sensor updates)
 #define TM1637_PATTERN_APPLY_INTERVAL_MS 60000UL  // re-apply every 60 seconds
 
+#ifdef USERMOD_BASEBALL_API
 #include "../baseball_api/usermod_baseball_api.h"
+#endif
 
 class TM1637ClockUsermod : public Usermod {
   private:
@@ -67,7 +69,9 @@ class TM1637ClockUsermod : public Usermod {
     static TM1637ClockUsermod* _instance;
 
     // Pointer to Baseball API usermod (set in setup if available)
+    #ifdef USERMOD_BASEBALL_API
     UsermodBaseballAPI* baseballApi = nullptr;
+    #endif
 
     // Show a baseball score on the TM1637 display (favorite left, opponent right)
     void showBaseballScore(const String& fav, int favScore, const String& opp, int oppScore) {
@@ -173,103 +177,6 @@ class TM1637ClockUsermod : public Usermod {
     }
 #endif
 
-    // Returns severity 1 (mild) to 3 (severe) for a WeatherAPI condition code
-    static uint8_t conditionSeverity(int code) {
-      // Clear
-      if (code == 1000) return 1;
-      // Cloudy: partly=1, cloudy=2, overcast=3
-      if (code == 1003) return 1;
-      if (code == 1006) return 2;
-      if (code == 1009) return 3;
-      // Fog: mist=1, fog=2, freezing fog=3
-      if (code == 1030) return 1;
-      if (code == 1135) return 2;
-      if (code == 1147) return 3;
-      // Thunder: possible=1, light with thunder=2, heavy with thunder=3
-      if (code == 1087) return 1;
-      if (code == 1273 || code == 1279) return 2;
-      if (code == 1276 || code == 1282) return 3;
-      // Snow/Ice: light=1, moderate=2, heavy/blizzard=3
-      if (code == 1210 || code == 1213 || code == 1255) return 1;
-      if (code == 1114 || code == 1216 || code == 1219 || code == 1237 ||
-          code == 1258 || code == 1261) return 2;
-      if (code == 1117 || code == 1222 || code == 1225 || code == 1264) return 3;
-      // Rain: light/patchy=1, moderate=2, heavy/torrential=3
-      if (code == 1063 || code == 1069 || code == 1072 || code == 1150 ||
-          code == 1153 || code == 1180 || code == 1183 || code == 1198 ||
-          code == 1204 || code == 1240 || code == 1249) return 1;
-      if (code == 1186 || code == 1189 || code == 1201 || code == 1207 ||
-          code == 1243 || code == 1252) return 2;
-      if (code == 1171 || code == 1192 || code == 1195 || code == 1246) return 3;
-      return 1;  // default mild
-    }
-
-    // Map a WeatherAPI condition code to a condition category index (0-5)
-    static uint8_t conditionToCategory(int code) {
-      if (code == 1000) return 0;  // Clear/Sunny
-      if (code <= 1009) return 1;  // Cloudy/Overcast
-      if (code == 1030 || code == 1135 || code == 1147) return 2;  // Fog/Mist
-      if (code == 1087 || code >= 1273) return 3;  // Thunder/Storm
-      if ((code >= 1114 && code <= 1117) || (code >= 1210 && code <= 1264)) return 4;  // Snow/Ice
-      return 5;  // Rain/Drizzle (default)
-    }
-
-    // Returns a human-readable description for a WeatherAPI condition code.
-    // Covers all 49 documented codes; returns "Unknown" for unrecognised values.
-    static const char* conditionDescription(int code) {
-      switch (code) {
-        case 1000: return "Clear";
-        case 1003: return "Partly cloudy";
-        case 1006: return "Cloudy";
-        case 1009: return "Overcast";
-        case 1030: return "Mist";
-        case 1063: return "Patchy rain possible";
-        case 1066: return "Patchy snow possible";
-        case 1069: return "Patchy sleet possible";
-        case 1072: return "Patchy freezing drizzle possible";
-        case 1087: return "Thundery outbreaks possible";
-        case 1114: return "Blowing snow";
-        case 1117: return "Blizzard";
-        case 1135: return "Fog";
-        case 1147: return "Freezing fog";
-        case 1150: return "Patchy light drizzle";
-        case 1153: return "Light drizzle";
-        case 1168: return "Freezing drizzle";
-        case 1171: return "Heavy freezing drizzle";
-        case 1180: return "Patchy light rain";
-        case 1183: return "Light rain";
-        case 1186: return "Moderate rain at times";
-        case 1189: return "Moderate rain";
-        case 1192: return "Heavy rain at times";
-        case 1195: return "Heavy rain";
-        case 1198: return "Light freezing rain";
-        case 1201: return "Moderate or heavy freezing rain";
-        case 1204: return "Light sleet";
-        case 1207: return "Moderate or heavy sleet";
-        case 1210: return "Patchy light snow";
-        case 1213: return "Light snow";
-        case 1216: return "Patchy moderate snow";
-        case 1219: return "Moderate snow";
-        case 1222: return "Patchy heavy snow";
-        case 1225: return "Heavy snow";
-        case 1237: return "Ice pellets";
-        case 1240: return "Light rain shower";
-        case 1243: return "Moderate or heavy rain shower";
-        case 1246: return "Torrential rain shower";
-        case 1249: return "Light sleet showers";
-        case 1252: return "Moderate or heavy sleet showers";
-        case 1255: return "Light snow showers";
-        case 1258: return "Moderate or heavy snow showers";
-        case 1261: return "Light showers of ice pellets";
-        case 1264: return "Moderate or heavy showers of ice pellets";
-        case 1273: return "Patchy light rain with thunder";
-        case 1276: return "Moderate or heavy rain with thunder";
-        case 1279: return "Patchy light snow with thunder";
-        case 1282: return "Moderate or heavy snow with thunder";
-        default:   return "Unknown";
-      }
-    }
-
   public:
     void setup() override {
 #ifdef USERMOD_WEATHER_API
@@ -290,10 +197,12 @@ class TM1637ClockUsermod : public Usermod {
       }
 
       // Try to find Baseball API usermod (replace USERMOD_ID_BASEBALL_API with actual ID)
+      #ifdef USERMOD_BASEBALL_API
       baseballApi = (UsermodBaseballAPI*)UsermodManager::lookup(USERMOD_ID_BASEBALL_API);
       if (!baseballApi) {
         DEBUG_PRINTLN(F("TM1637 Clock: Baseball API usermod not found"));
       }
+      #endif
     }
 
     void loop() override {
@@ -345,8 +254,11 @@ class TM1637ClockUsermod : public Usermod {
       #endif
       }
 
+      #ifdef USERMOD_BASEBALL_API
       if(baseballApi){
-        if( baseballApi->isGameLive()){
+        static bool prevGameLive = false;
+        bool gameNowLive = baseballApi->isGameLive();
+        if(gameNowLive){
           if (baseballApi->getLastScore().length() > 0) {
             if (!baseballShown && (nowMs - lastWeatherCycleEnd > 6000)) {
               // Parse and display score
@@ -379,10 +291,14 @@ class TM1637ClockUsermod : public Usermod {
             lastWeatherCycleEnd = nowMs;
             DEBUG_PRINTLN(F("TM1637 Clock: MLB live game but no score available yet, skipping display") );
           }
-        }else{
-          
-         // DEBUG_PRINTLN(F("TM1637 Clock: MLB no live game, skipping baseball score display") );
+        } else {
+          // Log only once on the live → not-live transition, not every loop tick.
+          if (prevGameLive) {
+            DEBUG_PRINTLN(F("TM1637 Clock: MLB game ended, resuming normal display"));
+          }
+          baseballShown = false;
         }
+        prevGameLive = gameNowLive;
         // Show baseball score on TM1637 when a game is live (independent of weather)
         
       }else{
@@ -391,6 +307,7 @@ class TM1637ClockUsermod : public Usermod {
           lastGateLogMs = nowMs;
         }
       }
+      #endif
       
     }
 
@@ -442,9 +359,11 @@ class TM1637ClockUsermod : public Usermod {
     }
 
     // Expose current weather state in GET /json/state response.
+    // Note: `enabled` is intentionally excluded — it is a config-only value.
+    // Including it here would allow saved WLED presets to capture and later
+    // restore it, silently disabling the usermod when an old preset is applied.
     void addToJsonState(JsonObject& root) override {
       JsonObject top = root.createNestedObject("TM1637Clock");
-      top["enabled"]      = enabled;
       top["fetched"]      = weatherFetched;
       top["condCode"]     = weatherCondCode;
       top["condDesc"]     = conditionDescription(weatherCondCode);
@@ -467,13 +386,13 @@ class TM1637ClockUsermod : public Usermod {
     //   preset-*      — per-category preset overrides (same names as config keys)
     //   reapply       — immediately re-apply the current (or just-injected) weather pattern
     //   forceApply    — bypass baseball override once for explicit API testing
+    // Note: `enabled` is NOT accepted here — use the settings page (config) to enable/disable.
     void readFromJsonState(JsonObject& root) override {
       JsonObject top = root["TM1637Clock"];
       if (top.isNull()) return;
 
-      if (!top["enabled"].isNull()) {
-        enabled = top["enabled"].as<bool>();
-      }
+      // Note: `enabled` is not handled here — it is config-only and must not
+      // be overwritten by preset state (see addToJsonState for rationale).
       if (!top["overrideType"].isNull()) {
         uint8_t value = top["overrideType"].as<uint8_t>();
         weatherOverrideType = (value <= 2) ? value : weatherOverrideType;

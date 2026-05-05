@@ -4,6 +4,7 @@
 #include "usermod_tm1637_display.h"
 #ifdef USERMOD_WEATHER_API
   #include "../weather_api/usermod_weather_api.h"
+  #include "../weather_api/weather_light_patterns.h"
 #endif
 
 class TM1637DisplayUsermod;
@@ -119,88 +120,6 @@ class TM1637DisplayUsermod : public Usermod {
     }
 #endif
 
-    // Returns severity 1 (mild) to 3 (severe) for a WeatherAPI condition code.
-    // Used by showConditionText() to append a digit to the 3-letter abbreviation.
-    static uint8_t conditionSeverity(int code) {
-      if (code == 1000) return 1;
-      if (code == 1003) return 1;
-      if (code == 1006) return 2;
-      if (code == 1009) return 3;
-      if (code == 1030) return 1;
-      if (code == 1135) return 2;
-      if (code == 1147) return 3;
-      if (code == 1087) return 1;
-      if (code == 1273 || code == 1279) return 2;
-      if (code == 1276 || code == 1282) return 3;
-      if (code == 1210 || code == 1213 || code == 1255) return 1;
-      if (code == 1114 || code == 1216 || code == 1219 || code == 1237 ||
-          code == 1258 || code == 1261) return 2;
-      if (code == 1117 || code == 1222 || code == 1225 || code == 1264) return 3;
-      if (code == 1063 || code == 1069 || code == 1072 || code == 1150 ||
-          code == 1153 || code == 1180 || code == 1183 || code == 1198 ||
-          code == 1204 || code == 1240 || code == 1249) return 1;
-      if (code == 1186 || code == 1189 || code == 1201 || code == 1207 ||
-          code == 1243 || code == 1252) return 2;
-      if (code == 1171 || code == 1192 || code == 1195 || code == 1246) return 3;
-      return 1;  // default mild
-    }
-
-    // Returns a human-readable description for a WeatherAPI condition code.
-    // Covers all 49 documented codes; returns "Unknown" for unrecognised values.
-    static const char* conditionDescription(int code) {
-      switch (code) {
-        case 1000: return "Clear";
-        case 1003: return "Partly cloudy";
-        case 1006: return "Cloudy";
-        case 1009: return "Overcast";
-        case 1030: return "Mist";
-        case 1063: return "Patchy rain possible";
-        case 1066: return "Patchy snow possible";
-        case 1069: return "Patchy sleet possible";
-        case 1072: return "Patchy freezing drizzle possible";
-        case 1087: return "Thundery outbreaks possible";
-        case 1114: return "Blowing snow";
-        case 1117: return "Blizzard";
-        case 1135: return "Fog";
-        case 1147: return "Freezing fog";
-        case 1150: return "Patchy light drizzle";
-        case 1153: return "Light drizzle";
-        case 1168: return "Freezing drizzle";
-        case 1171: return "Heavy freezing drizzle";
-        case 1180: return "Patchy light rain";
-        case 1183: return "Light rain";
-        case 1186: return "Moderate rain at times";
-        case 1189: return "Moderate rain";
-        case 1192: return "Heavy rain at times";
-        case 1195: return "Heavy rain";
-        case 1198: return "Light freezing rain";
-        case 1201: return "Moderate or heavy freezing rain";
-        case 1204: return "Light sleet";
-        case 1207: return "Moderate or heavy sleet";
-        case 1210: return "Patchy light snow";
-        case 1213: return "Light snow";
-        case 1216: return "Patchy moderate snow";
-        case 1219: return "Moderate snow";
-        case 1222: return "Patchy heavy snow";
-        case 1225: return "Heavy snow";
-        case 1237: return "Ice pellets";
-        case 1240: return "Light rain shower";
-        case 1243: return "Moderate or heavy rain shower";
-        case 1246: return "Torrential rain shower";
-        case 1249: return "Light sleet showers";
-        case 1252: return "Moderate or heavy sleet showers";
-        case 1255: return "Light snow showers";
-        case 1258: return "Moderate or heavy snow showers";
-        case 1261: return "Light showers of ice pellets";
-        case 1264: return "Moderate or heavy showers of ice pellets";
-        case 1273: return "Patchy light rain with thunder";
-        case 1276: return "Moderate or heavy rain with thunder";
-        case 1279: return "Patchy light snow with thunder";
-        case 1282: return "Moderate or heavy snow with thunder";
-        default:   return "Unknown";
-      }
-    }
-
   public:
     bool showMessage(const char* msg, uint16_t durationMs = 3000) {
       if (!msg || !initDone || !display) return false;
@@ -313,6 +232,7 @@ class TM1637DisplayUsermod : public Usermod {
           break;
 
         case SHOW_TIME:
+#ifdef USERMOD_WEATHER_API
           if (showingTemp) {
             if (now - tempShowStart >= TM1637D_TEMP_SHOW_DURATION_MS) {
               // Temp window done — move to condition abbreviation
@@ -348,6 +268,9 @@ class TM1637DisplayUsermod : public Usermod {
               showTime();
             }
           }
+#else
+          showTime();
+#endif
           break;
       }
     }
@@ -367,10 +290,10 @@ class TM1637DisplayUsermod : public Usermod {
         newState = NO_INTERNET;
       } else if (!ntpEnabled || strlen(ntpServerName) == 0) {
         newState = NO_NTP;
-      } else if (toki.getTime().sec == 0) {
-        newState = NO_NTP;  // Time not yet synced
       } else {
-        newState = SHOW_TIME;
+        updateLocalTime();
+        bool timeValid = (localTime >= 1704067200UL && localTime < 4102444800UL);
+        newState = timeValid ? SHOW_TIME : NO_NTP;
       }
 
       // Reset temp/condition cycle flags when leaving SHOW_TIME so the
@@ -401,7 +324,9 @@ class TM1637DisplayUsermod : public Usermod {
       lastBlinkToggle = now;
       blinkColon      = !blinkColon;
 
-      if (toki.getTime().sec != 0) {
+      updateLocalTime();
+      bool timeValid = (localTime >= 1704067200UL && localTime < 4102444800UL);
+      if (timeValid) {
         int currentHour   = hour(localTime);
         int currentMinute = minute(localTime);
         static int lastLoggedMinute = -1;
@@ -478,6 +403,7 @@ class TM1637DisplayUsermod : public Usermod {
       display->setSegments(segs);
     }
 
+#ifdef USERMOD_WEATHER_API
     // Display a 3-letter condition abbreviation + severity digit (1–3).
     // Format: XXX# where XXX is the category and # is 1=mild, 2=moderate, 3=severe.
     //
@@ -531,6 +457,7 @@ class TM1637DisplayUsermod : public Usermod {
 
       display->setSegments(segs);
     }
+#endif // USERMOD_WEATHER_API
 
   public:
     uint16_t getId() override {
@@ -552,6 +479,7 @@ class TM1637DisplayUsermod : public Usermod {
           case SHOW_TIME:   stateStr = "Showing Time"; break;
         }
         tm1637.add(stateStr);
+#ifdef USERMOD_WEATHER_API
         if (weatherFetched && !weatherFetchFailed) {
           char tBuf[8]; dtostrf(temperatureC, 4, 1, tBuf);
           char wBuf[48];
@@ -560,6 +488,7 @@ class TM1637DisplayUsermod : public Usermod {
         } else if (WiFi.status() == WL_CONNECTED) {
           tm1637.add("Weather: fetching...");
         }
+#endif
       } else {
         tm1637.add("Disabled");
       }

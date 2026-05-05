@@ -34,7 +34,7 @@ class UsermodBaseballAPI : public Usermod {
     int lastHttpCode = 0;
     
     // Save/Restore light state
-    uint8_t savedMode, savedPalette, savedSpeed, savedIntensity;
+    uint8_t savedMode = 0, savedPalette = 0, savedSpeed = 128, savedIntensity = 128;
     bool gameOverrideActive = false;
     int8_t teamPaletteIndex = -1;
     String teamPaletteName = "";
@@ -249,9 +249,10 @@ class UsermodBaseballAPI : public Usermod {
     }
 
     bool _isGameHappeningNow(time_t nowUtc, time_t gameUtcTime) const {
-      // Consider a game "happeI'ning now" from 30 minutes before first pitch
-      // through 6 hours after first pitch to cover long/extra-inning games.
-      return gameUtcTime >= (nowUtc - 1800) && gameUtcTime <= (nowUtc + 21600);
+      // Consider a game "happening now" if its scheduled start time is within:
+      //   - up to 6 hours in the past  (covers long/extra-inning games in progress)
+      //   - up to 30 minutes in the future (pre-game window so override applies before first pitch)
+      return gameUtcTime >= (nowUtc - 21600) && gameUtcTime <= (nowUtc + 1800);
     }
 
     String _formatUtcDebug(time_t t) const {
@@ -281,7 +282,9 @@ class UsermodBaseballAPI : public Usermod {
     String _buildScheduleUrl(int mlbId) const {
       if (mlbId <= 0) return "";
       String url = "http://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=" + String(mlbId);
-      String startDate = _buildDateYmd(0);
+      // Start 1 day back (UTC) so games that began UTC-yesterday but are still
+      // in progress (e.g. late-night games past midnight UTC) are included.
+      String startDate = _buildDateYmd(-1);
       String endDate = _buildDateYmd(2);
       if (startDate.length() > 0 && endDate.length() > 0) {
         url += "&startDate=" + startDate + "&endDate=" + endDate;
@@ -789,7 +792,6 @@ class UsermodBaseballAPI : public Usermod {
         // Force next loop tick to fetch regardless of current connection state.
         // If not yet connected, the fetch guard in _doFetch() will retry each intervalMs
         // until connection succeeds.
-        lastFetch = millis() - intervalMs;
       }
 
       _ensureTeamPalette();

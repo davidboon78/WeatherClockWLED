@@ -395,6 +395,110 @@ inline void setLightsByAll(int conditionCode, float tempC, int hour24)
 
 
 // ===========================================================================
+// Condition utility functions (7b-7d)
+// Shared helpers for all usermods that consume WeatherAPI condition codes.
+// These are pure functions with no external dependencies.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 7b. Condition severity: 1=mild, 2=moderate, 3=severe
+//     Used to append a digit after the 3-letter abbreviation on a 4-digit
+//     display (e.g. "rAn2" = moderate rain).
+// ---------------------------------------------------------------------------
+inline uint8_t conditionSeverity(int code) {
+  if (code == 1000) return 1;  // Clear
+  if (code == 1003) return 1;  if (code == 1006) return 2;  if (code == 1009) return 3;  // Cloudy
+  if (code == 1030) return 1;  if (code == 1135) return 2;  if (code == 1147) return 3;  // Fog
+  if (code == 1087) return 1;  // Thunder possible
+  if (code == 1273 || code == 1279) return 2;
+  if (code == 1276 || code == 1282) return 3;
+  if (code == 1210 || code == 1213 || code == 1255) return 1;  // Snow light
+  if (code == 1114 || code == 1216 || code == 1219 || code == 1237 ||
+      code == 1258 || code == 1261) return 2;                  // Snow moderate
+  if (code == 1117 || code == 1222 || code == 1225 || code == 1264) return 3;  // Snow heavy
+  if (code == 1063 || code == 1069 || code == 1072 || code == 1150 ||
+      code == 1153 || code == 1180 || code == 1183 || code == 1198 ||
+      code == 1204 || code == 1240 || code == 1249) return 1;  // Rain light
+  if (code == 1186 || code == 1189 || code == 1201 || code == 1207 ||
+      code == 1243 || code == 1252) return 2;                  // Rain moderate
+  if (code == 1171 || code == 1192 || code == 1195 || code == 1246) return 3;  // Rain heavy
+  return 1;  // default mild
+}
+
+// ---------------------------------------------------------------------------
+// 7c. Human-readable condition description (all 49 WeatherAPI codes)
+// ---------------------------------------------------------------------------
+inline const char* conditionDescription(int code) {
+  switch (code) {
+    case 1000: return "Clear";
+    case 1003: return "Partly cloudy";
+    case 1006: return "Cloudy";
+    case 1009: return "Overcast";
+    case 1030: return "Mist";
+    case 1063: return "Patchy rain possible";
+    case 1066: return "Patchy snow possible";
+    case 1069: return "Patchy sleet possible";
+    case 1072: return "Patchy freezing drizzle possible";
+    case 1087: return "Thundery outbreaks possible";
+    case 1114: return "Blowing snow";
+    case 1117: return "Blizzard";
+    case 1135: return "Fog";
+    case 1147: return "Freezing fog";
+    case 1150: return "Patchy light drizzle";
+    case 1153: return "Light drizzle";
+    case 1168: return "Freezing drizzle";
+    case 1171: return "Heavy freezing drizzle";
+    case 1180: return "Patchy light rain";
+    case 1183: return "Light rain";
+    case 1186: return "Moderate rain at times";
+    case 1189: return "Moderate rain";
+    case 1192: return "Heavy rain at times";
+    case 1195: return "Heavy rain";
+    case 1198: return "Light freezing rain";
+    case 1201: return "Moderate or heavy freezing rain";
+    case 1204: return "Light sleet";
+    case 1207: return "Moderate or heavy sleet";
+    case 1210: return "Patchy light snow";
+    case 1213: return "Light snow";
+    case 1216: return "Patchy moderate snow";
+    case 1219: return "Moderate snow";
+    case 1222: return "Patchy heavy snow";
+    case 1225: return "Heavy snow";
+    case 1237: return "Ice pellets";
+    case 1240: return "Light rain shower";
+    case 1243: return "Moderate or heavy rain shower";
+    case 1246: return "Torrential rain shower";
+    case 1249: return "Light sleet showers";
+    case 1252: return "Moderate or heavy sleet showers";
+    case 1255: return "Light snow showers";
+    case 1258: return "Moderate or heavy snow showers";
+    case 1261: return "Light showers of ice pellets";
+    case 1264: return "Moderate or heavy showers of ice pellets";
+    case 1273: return "Patchy light rain with thunder";
+    case 1276: return "Moderate or heavy rain with thunder";
+    case 1279: return "Patchy light snow with thunder";
+    case 1282: return "Moderate or heavy snow with thunder";
+    default:   return "Unknown";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 7d. Condition category index: 0=Clear, 1=Cloudy, 2=Fog, 3=Thunder, 4=Snow, 5=Rain
+//     Used to map a condition code to a per-category preset or LED override.
+//     Note: code 1066 (Patchy snow possible) maps to Snow (4), not Rain.
+// ---------------------------------------------------------------------------
+inline uint8_t conditionToCategory(int code) {
+  if (code == 1000) return 0;  // Clear
+  if (code <= 1009) return 1;  // Cloudy/Overcast
+  if (code == 1030 || code == 1135 || code == 1147) return 2;  // Fog/Mist
+  if (code == 1087 || code >= 1273) return 3;  // Thunder/Storm
+  if (code == 1066 ||
+      (code >= 1114 && code <= 1117) ||
+      (code >= 1210 && code <= 1264)) return 4;  // Snow/Ice
+  return 5;  // Rain/Drizzle (default)
+}
+
+// ===========================================================================
 // Palette selection functions (8-14)
 // ===========================================================================
 //

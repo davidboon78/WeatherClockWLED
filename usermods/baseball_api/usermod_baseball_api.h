@@ -5,23 +5,29 @@
 
 class UsermodBaseballAPI : public Usermod {
 private:
+  static const uint32_t TEAM_COLOR_BLANK = 0xFFFFFFFF;
   static const char _name[];
   static const char _enabledKey[];
   static const char _teamKey[];
   static const char _overrideKey[];
+  static const char _paletteKey[];
+  static const char _statusKey[];
 
   bool enabled = false;
   bool initDone = false;
   unsigned long lastFetch = 0;
   unsigned long intervalMs = 600000;
+  bool wasConnected = false;
 
   String favoriteTeam = "";
   bool overrideLightsOnGame = false;
 
   bool gameLive = false;
+  int liveGamePk = 0;
   String lastScore = "No data";
   String nextGameInfo = "";
   String lastRequestUrl = "";
+  String lastLiveDataUrl = "";
   String lastFetchError = "";
   int lastHttpCode = 0;
 
@@ -43,12 +49,28 @@ private:
 
   const TeamMap* _resolveTeamMap(int mlbId) const;
   int _resolveMlbId() const;
+  const char* _resolveTeamName(int mlbId) const;
   String _buildTeamPaletteName(const TeamMap& team) const;
+  uint8_t _buildEffectiveTeamColors(const TeamMap& team, uint32_t outColors[5]) const;
   void _loadPaletteColors(CRGBPalette16& palette, const TeamMap& team) const;
   void _removeTeamPalette();
   void _ensureTeamPalette();
+  bool _hasValidClock() const;
+  time_t _currentUtcApprox() const;
+  int32_t _currentLocalOffsetSecs() const;
+  bool _parseApiUtc(const String& apiDate, time_t& utcTime) const;
+  String _formatApiUtcToLocal(const String& apiDate) const;
+  unsigned long _upcomingPollInterval(time_t gameUtcTime) const;
+  bool _isLiveState(const String& abstractState, const String& detailedState, const String& codedState) const;
+  bool _isFinalState(const String& abstractState, const String& detailedState, const String& codedState) const;
+  bool _isGameHappeningNow(time_t nowUtc, time_t gameUtcTime) const;
+  String _formatUtcDebug(time_t t) const;
   String _buildDateYmd(int dayOffset) const;
   String _buildScheduleUrl(int mlbId) const;
+  String _buildLiveDataUrl(int gamePk) const;
+  String _buildStatusLine() const;
+  String _buildPaletteDisplay() const;
+  String _buildStatusValue() const;
 
   void _doFetch();
   void _parseMLB(const String& json);
