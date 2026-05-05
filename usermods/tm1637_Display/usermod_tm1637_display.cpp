@@ -12,11 +12,30 @@ static TM1637DisplayUsermod* g_tm1637DisplayInstance = nullptr;
 
 /*
  * TM1637 Display Usermod
- * Drives a TM1637 4-digit 7-segment display showing:
- *   - Current time (from NTP), blinking colon
- *   - Outside temperature (°C) for 3 s every 5 s when weather data is available
- *   - Weather condition abbreviation + severity (e.g. "rAn2", "FOG1") after the temperature
+ * Drives a TM1637 4-digit 7-segment display showing a rotating cycle of slots:
+ *   - Time  (HH:MM with blinking colon) — shown for timeDurationMs between info cycles
+ *   - Temperature (°C)                  — shown for slotDurationMs
+ *   - Weather condition abbreviation    — shown for slotDurationMs (e.g. "rAn2", "FOG1")
+ *   - Baseball score (when live)        — shown for slotDurationMs, injected via slot provider
  *   - Status messages when WiFi / internet / NTP are unavailable
+ *
+ * Display cycle
+ * -------------
+ * The cycle is driven by a small fixed-size DisplaySlot queue.  When the queue
+ * empties, _rebuildQueue() is called which:
+ *   1. Always adds Temperature and Condition slots (when weather data is available).
+ *   2. Calls every registered SlotProvider callback so external usermods (e.g.
+ *      TM1637_Clock) can append additional slots (e.g. a live baseball score).
+ *
+ * Each slot carries its own duration so different content can be shown for
+ * different lengths of time.  The time display fills the gap between cycles
+ * using `timeDurationMs` (configurable).
+ *
+ * Adding a new data source
+ * ------------------------
+ * Call tm1637DisplayAddSlotProvider(myCallback) during setup.  The callback
+ * receives a reference to the queue builder and may call
+ * builder.push(SlotType, durationMs) to append slots.
  *
  * This module handles only the physical TM1637 display hardware.  WLED LED
  * light-pattern and palette control are intentionally omitted — see
@@ -39,9 +58,12 @@ static TM1637DisplayUsermod* g_tm1637DisplayInstance = nullptr;
 #define USERMOD_TM1637_DIO_PIN 12  // D6 on NodeMCU
 #endif
 
-// How often and how long to show temperature + condition on the display
-#define TM1637D_TEMP_SHOW_EVERY_MS    5000U   // show temp every 5 seconds
-#define TM1637D_TEMP_SHOW_DURATION_MS 3000U   // keep temp visible for 3 seconds
+// Maximum number of registered external slot providers
+#define TM1637D_PROVIDER_MAX  4
+
+// ---------------------------------------------------------------------------
+// TM1637DisplayUsermod
+// ---------------------------------------------------------------------------
 
 class TM1637DisplayUsermod : public Usermod {
   private:
@@ -57,31 +79,41 @@ class TM1637DisplayUsermod : public Usermod {
     int8_t  dioPin     = USERMOD_TM1637_DIO_PIN;
     uint8_t brightness = 2;  // 0–7, 7 is brightest
 
+    // Configurable slot durations (milliseconds).
+    // slotDurationMs applies to every info slot (temp, condition, custom, …).
+    // timeDurationMs is the clock-face gap shown between full info cycles.
+    uint16_t slotDurationMs = 3000;  // default: 3 s per info slot
+    uint16_t timeDurationMs = 5000;  // default: 5 s of clock between cycles
+
     // Weather data received from WeatherApi usermod
     float temperatureC       = 0.0f;
     int   conditionCode      = 1000;  // default: clear/sunny (valid WeatherAPI code)
     bool  weatherFetched     = false;
     bool  weatherFetchFailed = false;
 
-    // Temperature / condition display cycling
-    bool          showingTemp        = false;
-    bool          showingCondition   = false;
-    unsigned long tempShowStart      = 0;  // when we started showing temp
-    unsigned long conditionShowStart = 0;  // when we started showing condition
-    unsigned long lastTempCycleEnd   = 0;  // when the full temp+condition cycle ended
+    // Display slot queue — rebuilt whenever it empties
+    SlotQueue _queue;
+    unsigned long _slotStart = 0;  // millis() when the current slot began
+
+    // Whether the display is currently showing the inter-cycle clock face.
+    // Becomes false as soon as the first slot of a new cycle is dequeued.
+    bool _showingTime = true;
+    unsigned long _timeStart = 0;  // millis() when time display began
+
+    // External slot provider callbacks registered by other usermods
+    SlotProviderFn _providers[TM1637D_PROVIDER_MAX];
+    uint8_t        _providerCount = 0;
 
     // Display state machine
     enum DisplayState {
       NO_WIFI,      // WiFi not connected
       NO_INTERNET,  // WiFi connected but no internet
       NO_NTP,       // Internet reachable but NTP not configured or not yet synced
-      SHOW_TIME     // Normal time display
+      SHOW_TIME     // Normal time/info display
     };
 
     DisplayState currentState = NO_WIFI;
     DisplayState lastState    = SHOW_TIME;  // Force initial update
-    char overrideMessage[5]   = {0, 0, 0, 0, 0};
-    unsigned long overrideUntil = 0;
 
     // Pre-built 7-segment patterns for status messages
     const uint8_t MSG_NO_WIFI[4]     = {0x00, 0x00, 0x00, 0x00};  // "    " blank
@@ -95,6 +127,8 @@ class TM1637DisplayUsermod : public Usermod {
     static const char _clkPin[];
     static const char _dioPin[];
     static const char _brightness[];
+    static const char _slotDuration[];
+    static const char _timeDuration[];
 
     // Singleton pointer used by static WeatherApi subscription callbacks.
     // Safe because TM1637DisplayUsermod is registered as a single instance.
@@ -120,13 +154,97 @@ class TM1637DisplayUsermod : public Usermod {
     }
 #endif
 
+    // Build a fresh display cycle into _queue.
+    // Always adds weather slots when data is available, then asks every
+    // registered provider to append its own slots.
+    void _rebuildQueue() {
+      _queue.clear();
+
+#ifdef USERMOD_WEATHER_API
+      if (weatherFetched && !weatherFetchFailed) {
+        _queue.push(SLOT_TEMP,      slotDurationMs);
+        _queue.push(SLOT_CONDITION, slotDurationMs);
+        DEBUG_PRINTLN(F("TM1637 Display: queue rebuilt with temp+condition slots"));
+      }
+#endif
+
+      // Let external usermods inject their own slots (e.g. baseball score)
+      for (uint8_t i = 0; i < _providerCount; i++) {
+        if (_providers[i]) _providers[i](_queue);
+      }
+
+      // If nothing was pushed (no weather yet, no providers), leave queue
+      // empty so we just keep showing the clock until data arrives.
+    }
+
+    // Advance to the next slot in the queue, or start the inter-cycle time
+    // display when the queue empties.
+    void _advanceSlot(unsigned long now) {
+      if (!_queue.empty()) {
+        _queue.pop();
+      }
+      if (_queue.empty()) {
+        // End of cycle — rebuild for the next pass and show clock face first
+        _rebuildQueue();
+        _showingTime = true;
+        _timeStart   = now;
+        DEBUG_PRINTLN(F("TM1637 Display: cycle complete, showing time"));
+      } else {
+        _slotStart   = now;
+        _showingTime = false;
+        DEBUG_PRINTF("TM1637 Display: advancing to next slot type=%d\n",
+                     (int)_queue.front().type);
+      }
+    }
+
+    // Render whichever slot is at the front of the queue.
+    void _renderCurrentSlot(unsigned long now) {
+      if (_queue.empty()) return;
+      const DisplaySlot& slot = _queue.front();
+
+      switch (slot.type) {
+        case SLOT_TEMP:      _renderTemperature(); break;
+        case SLOT_CONDITION: _renderCondition();   break;
+        case SLOT_BASEBALL:  /* fall-through: custom text */
+        case SLOT_CUSTOM:    _renderCustomText(slot.text); break;
+        default:             break;
+      }
+    }
+
   public:
-    bool showMessage(const char* msg, uint16_t durationMs = 3000) {
-      if (!msg || !initDone || !display) return false;
-      strncpy(overrideMessage, msg, sizeof(overrideMessage) - 1);
-      overrideMessage[sizeof(overrideMessage) - 1] = '\0';
-      overrideUntil = millis() + durationMs;
+    // Register a callback that will be called every time the display queue
+    // is rebuilt (i.e., every cycle).  The callback may push additional slots.
+    // Safe to call from setup() of another usermod after this one has run setup().
+    bool addSlotProvider(SlotProviderFn fn) {
+      if (!fn || _providerCount >= TM1637D_PROVIDER_MAX) return false;
+      _providers[_providerCount++] = fn;
       return true;
+    }
+
+    // Return the configured slot duration so callers can use a consistent value.
+    uint16_t getSlotDurationMs() const { return slotDurationMs; }
+
+    // Push a one-off SLOT_CUSTOM message into the *current* cycle immediately.
+    // If the queue is full it is silently dropped.  The slot is inserted at the
+    // front (after the current slot completes) so it plays before the normal
+    // weather slots finish.
+    bool showMessage(const char* msg, uint16_t durationMs = 0) {
+      if (!msg || !initDone || !display) return false;
+      uint16_t dur = durationMs > 0 ? durationMs : slotDurationMs;
+      // If we are currently showing time, start the queue immediately with
+      // this message rather than waiting for the time window to expire.
+      if (_showingTime) {
+        _queue.clear();
+        bool ok = _queue.push(SLOT_CUSTOM, dur, msg);
+        if (ok) {
+          _showingTime = false;
+          _slotStart   = millis();
+          DEBUG_PRINTF("TM1637 Display: showMessage injected '%s' dur=%u\n", msg, dur);
+        }
+        return ok;
+      }
+      // Otherwise push after the current slot by temporarily borrowing the tail
+      return _queue.push(SLOT_CUSTOM, dur, msg);
     }
 
     void setup() override {
@@ -157,6 +275,10 @@ class TM1637DisplayUsermod : public Usermod {
 
       g_tm1637DisplayInstance = this;
 
+      // Start in the time-display phase; queue will be built on first cycle end
+      _showingTime = true;
+      _timeStart   = millis();
+
 #ifdef USERMOD_WEATHER_API
       _instance = this;
       auto* wapi = (WeatherApiUsermod*)UsermodManager::lookup(USERMOD_ID_WEATHER_API);
@@ -175,27 +297,10 @@ class TM1637DisplayUsermod : public Usermod {
 
       unsigned long now = millis();
 
-      if (overrideMessage[0] != '\0' && (long)(overrideUntil - now) > 0) {
-        uint8_t segs[4] = {0, 0, 0, 0};
-        for (uint8_t i = 0; i < 4; i++) {
-          char c = overrideMessage[i];
-          if (c == '\0' || c == ' ') segs[i] = 0x00;
-          else if (c >= '0' && c <= '9') segs[i] = display->encodeDigit(c - '0');
-          else if (c == '-') segs[i] = 0x40;
-          else segs[i] = 0x00;
-        }
-        display->setSegments(segs);
-        return;
-      }
-
-      if (overrideMessage[0] != '\0' && (long)(overrideUntil - now) <= 0) {
-        overrideMessage[0] = '\0';
-      }
-
       // Poll display state every 100 ms for responsiveness
       if (now - lastUpdate > 100) {
         lastUpdate = now;
-        updateDisplayState();
+        _updateDisplayState();
       }
 
       // Always clear the display at startup or when state changes
@@ -205,12 +310,11 @@ class TM1637DisplayUsermod : public Usermod {
         prevState = currentState;
       }
 
-      // Handle display content based on current state
       switch (currentState) {
         case NO_WIFI:
           if (currentState != lastState) {
             display->clear();
-            showScrollingMessage("WiFi", 4);
+            _showScrollingMessage("WiFi");
             lastState = currentState;
           }
           break;
@@ -232,45 +336,52 @@ class TM1637DisplayUsermod : public Usermod {
           break;
 
         case SHOW_TIME:
-#ifdef USERMOD_WEATHER_API
-          if (showingTemp) {
-            if (now - tempShowStart >= TM1637D_TEMP_SHOW_DURATION_MS) {
-              // Temp window done — move to condition abbreviation
-              showingTemp        = false;
-              showingCondition   = true;
-              conditionShowStart = now;
-              DEBUG_PRINTF("TM1637 Display: displaying condition %d = \"%s\"\n",
-                conditionCode, conditionDescription(conditionCode));
-              showConditionText();
+          lastState = currentState;
+          if (_showingTime) {
+            // Show clock face until the time window expires
+            if ((now - _timeStart) >= (unsigned long)timeDurationMs) {
+              // Time window done — try to populate the queue if it is empty.
+              // This handles first boot where _rebuildQueue() was never called yet.
+              if (_queue.empty()) {
+                _rebuildQueue();
+              }
+              if (!_queue.empty()) {
+                // Queue has content — start first slot of the new cycle
+                _showingTime = false;
+                _slotStart   = now;
+                DEBUG_PRINTF("TM1637 Display: time window done, starting slot type=%d\n",
+                             (int)_queue.front().type);
+              } else {
+                // Still no data (e.g. weather not yet fetched) — reset timer
+                // and keep showing the clock until a source provides content.
+                _timeStart = now;
+                _renderTime(now);
+              }
             } else {
-              showTemperature();
-            }
-          } else if (showingCondition) {
-            if (now - conditionShowStart >= TM1637D_TEMP_SHOW_DURATION_MS) {
-              // Condition window done — return to clock.
-              // Reset lastTempCycleEnd to NOW so the 5-second gap starts after
-              // the full cycle completes, preventing immediate back-to-back replay.
-              showingCondition = false;
-              lastTempCycleEnd = now;
-            } else {
-              showConditionText();
+              _renderTime(now);
             }
           } else {
-            if (weatherFetched && !weatherFetchFailed &&
-                (now - lastTempCycleEnd >= TM1637D_TEMP_SHOW_EVERY_MS)) {
-              // 5-second gap elapsed — start with temperature
-              showingTemp   = true;
-              tempShowStart = now;
-              { char tBuf[8]; dtostrf(temperatureC, 4, 1, tBuf);
-                DEBUG_PRINTF("TM1637 Display: displaying temperature %s C\n", tBuf); }
-              showTemperature();
+            // Playing through the info queue
+            if (_queue.empty()) {
+              // No slots available (e.g. no weather yet, no providers pushed anything)
+              // Rebuild and fall back to clock until data arrives
+              _rebuildQueue();
+              _showingTime = true;
+              _timeStart   = now;
+              _renderTime(now);
             } else {
-              showTime();
+              // Check if the current slot has expired
+              if ((now - _slotStart) >= (unsigned long)_queue.front().durationMs) {
+                _advanceSlot(now);
+              }
+              // Render whatever is at the front (may have just changed)
+              if (_showingTime) {
+                _renderTime(now);
+              } else {
+                _renderCurrentSlot(now);
+              }
             }
           }
-#else
-          showTime();
-#endif
           break;
       }
     }
@@ -281,12 +392,12 @@ class TM1637DisplayUsermod : public Usermod {
     }
 
   private:
-    void updateDisplayState() {
+    void _updateDisplayState() {
       DisplayState newState;
 
       if (WiFi.status() != WL_CONNECTED) {
         newState = NO_WIFI;
-      } else if (!isConnectedToInternet()) {
+      } else if (!_isConnectedToInternet()) {
         newState = NO_INTERNET;
       } else if (!ntpEnabled || strlen(ntpServerName) == 0) {
         newState = NO_NTP;
@@ -296,31 +407,24 @@ class TM1637DisplayUsermod : public Usermod {
         newState = timeValid ? SHOW_TIME : NO_NTP;
       }
 
-      // Reset temp/condition cycle flags when leaving SHOW_TIME so the
-      // cycle restarts cleanly on reconnect.
+      // Reset queue state cleanly when leaving SHOW_TIME
       if (currentState == SHOW_TIME && newState != SHOW_TIME) {
-        showingTemp      = false;
-        showingCondition = false;
+        _queue.clear();
+        _showingTime = true;
       }
 
       currentState = newState;
     }
 
-    bool isConnectedToInternet() {
+    bool _isConnectedToInternet() {
       // Treat a non-zero gateway as proof of internet reachability.
-      // A more thorough check would ping an external host, but that
-      // adds latency and complexity not warranted here.
       return (WiFi.gatewayIP() != IPAddress(0, 0, 0, 0));
     }
 
     // Render the current time (HH:MM, 12-hour) with a blinking colon.
     // Shows "----" if NTP has not yet delivered a valid time.
-    void showTime() {
-      if (currentState != lastState) lastState = currentState;
-
-      unsigned long now = millis();
+    void _renderTime(unsigned long now) {
       if (now - lastBlinkToggle <= 500) return;  // Only refresh every 500 ms
-
       lastBlinkToggle = now;
       blinkColon      = !blinkColon;
 
@@ -331,7 +435,6 @@ class TM1637DisplayUsermod : public Usermod {
         int currentMinute = minute(localTime);
         static int lastLoggedMinute = -1;
 
-        // Convert to 12-hour format
         if (currentHour == 0)       currentHour = 12;
         else if (currentHour > 12)  currentHour -= 12;
 
@@ -342,14 +445,12 @@ class TM1637DisplayUsermod : public Usermod {
           lastLoggedMinute = currentMinute;
         }
       } else {
-        const uint8_t dashes[4] = {0x40, 0x40, 0x40, 0x40};  // "----"
+        const uint8_t dashes[4] = {0x40, 0x40, 0x40, 0x40};
         display->setSegments(dashes);
       }
     }
 
-    // Display a short status message.  Currently only "WiFI" is handled;
-    // the parameter is retained for future expansion.
-    void showScrollingMessage(const char* message, int /*len*/) {
+    void _showScrollingMessage(const char* message) {
       if (strcmp(message, "WiFi") == 0) {
         display->setSegments(MSG_WIFI);
       }
@@ -358,25 +459,23 @@ class TM1637DisplayUsermod : public Usermod {
     // Render the current temperature on the display.
     // Format: "  XC" (single digit), " XXC" (double), "XXXC" (triple),
     //         "-XC" / "-XXC" (negative).
-    void showTemperature() {
+    void _renderTemperature() {
       if (!weatherFetched || weatherFetchFailed) {
-        const uint8_t dashes[4] = {0x40, 0x40, 0x40, 0x40};  // "----"
+        const uint8_t dashes[4] = {0x40, 0x40, 0x40, 0x40};
         display->setSegments(dashes);
         return;
       }
 
-      const uint8_t kSegCelsius = 0x39;  // C
-      const uint8_t kSegMinus   = 0x40;  // minus sign
-      const uint8_t kSegBlank   = 0x00;  // blank digit
+      const uint8_t kSegCelsius = 0x39;
+      const uint8_t kSegMinus   = 0x40;
+      const uint8_t kSegBlank   = 0x00;
 
       int tempInt = (int)roundf(temperatureC);
       uint8_t segs[4];
 
       if (tempInt >= 0 && tempInt < 10) {
-        segs[0] = kSegBlank;
-        segs[1] = kSegBlank;
-        segs[2] = display->encodeDigit(tempInt);
-        segs[3] = kSegCelsius;
+        segs[0] = kSegBlank; segs[1] = kSegBlank;
+        segs[2] = display->encodeDigit(tempInt); segs[3] = kSegCelsius;
       } else if (tempInt >= 10 && tempInt < 100) {
         segs[0] = kSegBlank;
         segs[1] = display->encodeDigit(tempInt / 10);
@@ -388,7 +487,6 @@ class TM1637DisplayUsermod : public Usermod {
         segs[2] = display->encodeDigit(tempInt % 10);
         segs[3] = kSegCelsius;
       } else {
-        // Negative temperature: "-XC" or "-XXC"
         int absTemp = -tempInt;
         segs[0] = kSegMinus;
         if (absTemp < 10) {
@@ -414,26 +512,25 @@ class TM1637DisplayUsermod : public Usermod {
     //  Thunder     tHN1–3    possible=1, light+thunder=2, heavy+thunder=3
     //  Snow/Ice    Sno1–3    light=1, moderate=2, heavy/blizzard=3
     //  Rain        rAn1–3    light=1, moderate=2, heavy=3
-    void showConditionText() {
-      static const uint8_t kSeg_S = 0x6D;  // S
-      static const uint8_t kSeg_C = 0x39;  // C
-      static const uint8_t kSeg_L = 0x38;  // L
-      static const uint8_t kSeg_d = 0x5E;  // d (lowercase)
-      static const uint8_t kSeg_F = 0x71;  // F
-      static const uint8_t kSeg_o = 0x5C;  // o (lowercase)
-      static const uint8_t kSeg_G = 0x3D;  // G
-      static const uint8_t kSeg_t = 0x78;  // t
-      static const uint8_t kSeg_H = 0x76;  // H
-      static const uint8_t kSeg_n = 0x54;  // n (lowercase)
-      static const uint8_t kSeg_r = 0x50;  // r (lowercase)
-      static const uint8_t kSeg_A = 0x77;  // A
-      static const uint8_t kBlank = 0x00;  // blank digit
+    void _renderCondition() {
+      static const uint8_t kSeg_S = 0x6D;
+      static const uint8_t kSeg_C = 0x39;
+      static const uint8_t kSeg_L = 0x38;
+      static const uint8_t kSeg_d = 0x5E;
+      static const uint8_t kSeg_F = 0x71;
+      static const uint8_t kSeg_o = 0x5C;
+      static const uint8_t kSeg_G = 0x3D;
+      static const uint8_t kSeg_t = 0x78;
+      static const uint8_t kSeg_H = 0x76;
+      static const uint8_t kSeg_n = 0x54;
+      static const uint8_t kSeg_r = 0x50;
+      static const uint8_t kSeg_A = 0x77;
+      static const uint8_t kBlank = 0x00;
 
       uint8_t segs[4];
 
       if (conditionCode == 1000) {
-        // " CLr" — avoids "SUN" being read as Sunday; valid day and night
-        segs[0] = kBlank;  segs[1] = kSeg_C;  segs[2] = kSeg_L;  segs[3] = kSeg_d;
+        segs[0] = kBlank; segs[1] = kSeg_C; segs[2] = kSeg_L; segs[3] = kSeg_d;
         display->setSegments(segs);
         return;
       }
@@ -441,23 +538,35 @@ class TM1637DisplayUsermod : public Usermod {
       segs[3] = display->encodeDigit(conditionSeverity(conditionCode));
 
       if (conditionCode <= 1009) {
-        segs[0] = kSeg_C;  segs[1] = kSeg_L;  segs[2] = kSeg_d;  // CLD
-      } else if (conditionCode == 1030 ||
-                 conditionCode == 1135 ||
-                 conditionCode == 1147) {
-        segs[0] = kSeg_F;  segs[1] = kSeg_o;  segs[2] = kSeg_G;  // FOG
+        segs[0] = kSeg_C; segs[1] = kSeg_L; segs[2] = kSeg_d;
+      } else if (conditionCode == 1030 || conditionCode == 1135 || conditionCode == 1147) {
+        segs[0] = kSeg_F; segs[1] = kSeg_o; segs[2] = kSeg_G;
       } else if (conditionCode == 1087 || conditionCode >= 1273) {
-        segs[0] = kSeg_t;  segs[1] = kSeg_H;  segs[2] = kSeg_n;  // tHN
+        segs[0] = kSeg_t; segs[1] = kSeg_H; segs[2] = kSeg_n;
       } else if ((conditionCode >= 1114 && conditionCode <= 1117) ||
-                  (conditionCode >= 1210 && conditionCode <= 1264)) {
-        segs[0] = kSeg_S;  segs[1] = kSeg_n;  segs[2] = kSeg_o;  // Sno
+                 (conditionCode >= 1210 && conditionCode <= 1264)) {
+        segs[0] = kSeg_S; segs[1] = kSeg_n; segs[2] = kSeg_o;
       } else {
-        segs[0] = kSeg_r;  segs[1] = kSeg_A;  segs[2] = kSeg_n;  // rAn
+        segs[0] = kSeg_r; segs[1] = kSeg_A; segs[2] = kSeg_n;
       }
 
       display->setSegments(segs);
     }
+#else
+    void _renderCondition() {}  // stub when weather API is not compiled in
 #endif // USERMOD_WEATHER_API
+
+    // Render a 4-character custom text slot.
+    // Supports digits (0–9) and '-'; all other characters become blanks.
+    void _renderCustomText(const char* text) {
+      uint8_t segs[4] = {0, 0, 0, 0};
+      for (uint8_t i = 0; i < 4 && text[i] != '\0'; i++) {
+        char c = text[i];
+        if (c >= '0' && c <= '9') segs[i] = display->encodeDigit(c - '0');
+        else if (c == '-')        segs[i] = 0x40;
+      }
+      display->setSegments(segs);
+    }
 
   public:
     uint16_t getId() override {
@@ -479,6 +588,10 @@ class TM1637DisplayUsermod : public Usermod {
           case SHOW_TIME:   stateStr = "Showing Time"; break;
         }
         tm1637.add(stateStr);
+        char qBuf[32];
+        snprintf(qBuf, sizeof(qBuf), "Queue: %d slots  slot=%us  time=%us",
+                 _queue.count, slotDurationMs / 1000, timeDurationMs / 1000);
+        tm1637.add(qBuf);
 #ifdef USERMOD_WEATHER_API
         if (weatherFetched && !weatherFetchFailed) {
           char tBuf[8]; dtostrf(temperatureC, 4, 1, tBuf);
@@ -496,10 +609,12 @@ class TM1637DisplayUsermod : public Usermod {
 
     void addToConfig(JsonObject& root) override {
       JsonObject top = root.createNestedObject(FPSTR(_name));
-      top[FPSTR(_enabled)]    = enabled;
-      top[FPSTR(_clkPin)]     = clkPin;
-      top[FPSTR(_dioPin)]     = dioPin;
-      top[FPSTR(_brightness)] = brightness;
+      top[FPSTR(_enabled)]      = enabled;
+      top[FPSTR(_clkPin)]       = clkPin;
+      top[FPSTR(_dioPin)]       = dioPin;
+      top[FPSTR(_brightness)]   = brightness;
+      top[FPSTR(_slotDuration)] = slotDurationMs;
+      top[FPSTR(_timeDuration)] = timeDurationMs;
     }
 
     bool readFromConfig(JsonObject& root) override {
@@ -507,16 +622,21 @@ class TM1637DisplayUsermod : public Usermod {
       if (top.isNull()) return false;
 
       bool configComplete = true;
-      configComplete &= getJsonValue(top[FPSTR(_enabled)],    enabled);
-      configComplete &= getJsonValue(top[FPSTR(_clkPin)],     clkPin);
-      configComplete &= getJsonValue(top[FPSTR(_dioPin)],     dioPin);
-      configComplete &= getJsonValue(top[FPSTR(_brightness)], brightness, (uint8_t)2);
+      configComplete &= getJsonValue(top[FPSTR(_enabled)],      enabled);
+      configComplete &= getJsonValue(top[FPSTR(_clkPin)],       clkPin);
+      configComplete &= getJsonValue(top[FPSTR(_dioPin)],       dioPin);
+      configComplete &= getJsonValue(top[FPSTR(_brightness)],   brightness,   (uint8_t)2);
+      configComplete &= getJsonValue(top[FPSTR(_slotDuration)], slotDurationMs, (uint16_t)3000);
+      configComplete &= getJsonValue(top[FPSTR(_timeDuration)], timeDurationMs, (uint16_t)5000);
+
+      // Enforce sensible minimums so the display is always readable
+      if (slotDurationMs < 500)  slotDurationMs = 500;
+      if (timeDurationMs < 1000) timeDurationMs = 1000;
 
       DEBUG_PRINTLN(F("TM1637 Display: readFromConfig"));
-      DEBUG_PRINTF("  enabled=%d  clkPin=%d  dioPin=%d  brightness=%d\n",
-        enabled, clkPin, dioPin, brightness);
+      DEBUG_PRINTF("  enabled=%d  clkPin=%d  dioPin=%d  brightness=%d  slot=%u  time=%u\n",
+        enabled, clkPin, dioPin, brightness, slotDurationMs, timeDurationMs);
 
-      // Apply brightness immediately without requiring a reboot
       if (display) display->setBrightness(brightness);
 
       return configComplete;
@@ -526,6 +646,8 @@ class TM1637DisplayUsermod : public Usermod {
       oappend(SET_F("addInfo('TM1637Display:CLK-pin',1,'D5 / GPIO14 on NodeMCU');"));
       oappend(SET_F("addInfo('TM1637Display:DIO-pin',1,'D6 / GPIO12 on NodeMCU');"));
       oappend(SET_F("addInfo('TM1637Display:brightness',1,'0 (dim) \xe2\x80\x93 7 (bright)');"));
+      oappend(SET_F("addInfo('TM1637Display:slot-duration-ms',1,'How long each info slot is shown (ms, min 500)');"));
+      oappend(SET_F("addInfo('TM1637Display:time-duration-ms',1,'How long the clock is shown between info cycles (ms, min 1000)');"));
     }
 
     void enable(bool en)  { enabled = en; }
@@ -534,11 +656,13 @@ class TM1637DisplayUsermod : public Usermod {
 
 // Static member definitions
 TM1637DisplayUsermod* TM1637DisplayUsermod::_instance = nullptr;
-const char TM1637DisplayUsermod::_name[]       PROGMEM = "TM1637Display";
-const char TM1637DisplayUsermod::_enabled[]    PROGMEM = "enabled";
-const char TM1637DisplayUsermod::_clkPin[]     PROGMEM = "CLK-pin";
-const char TM1637DisplayUsermod::_dioPin[]     PROGMEM = "DIO-pin";
-const char TM1637DisplayUsermod::_brightness[] PROGMEM = "brightness";
+const char TM1637DisplayUsermod::_name[]         PROGMEM = "TM1637Display";
+const char TM1637DisplayUsermod::_enabled[]      PROGMEM = "enabled";
+const char TM1637DisplayUsermod::_clkPin[]       PROGMEM = "CLK-pin";
+const char TM1637DisplayUsermod::_dioPin[]       PROGMEM = "DIO-pin";
+const char TM1637DisplayUsermod::_brightness[]   PROGMEM = "brightness";
+const char TM1637DisplayUsermod::_slotDuration[] PROGMEM = "slot-duration-ms";
+const char TM1637DisplayUsermod::_timeDuration[] PROGMEM = "time-duration-ms";
 
 // Create and register the usermod instance
 static TM1637DisplayUsermod tm1637Display;
@@ -547,6 +671,16 @@ REGISTER_USERMOD(tm1637Display);
 bool tm1637DisplayShowMessage(const char* msg, uint16_t durationMs) {
   if (!g_tm1637DisplayInstance) return false;
   return g_tm1637DisplayInstance->showMessage(msg, durationMs);
+}
+
+bool tm1637DisplayAddSlotProvider(SlotProviderFn fn) {
+  if (!g_tm1637DisplayInstance) return false;
+  return g_tm1637DisplayInstance->addSlotProvider(fn);
+}
+
+uint16_t tm1637DisplayGetSlotDurationMs() {
+  if (!g_tm1637DisplayInstance) return 3000;
+  return g_tm1637DisplayInstance->getSlotDurationMs();
 }
 
 #endif // USERMOD_TM1637_DISPLAY

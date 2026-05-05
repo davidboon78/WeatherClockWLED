@@ -73,16 +73,40 @@ class TM1637ClockUsermod : public Usermod {
     UsermodBaseballAPI* baseballApi = nullptr;
     #endif
 
-    // Show a baseball score on the TM1637 display (favorite left, opponent right)
-    void showBaseballScore(const String& fav, int favScore, const String& opp, int oppScore) {
-      // Format: D-D (single digit per side, fits 4-char TM1637)
-      char buf[5];
+    // Build a 4-char score text (D-D) from parsed scores.
+    // Returns the text in outBuf[5].
+    static void _buildScoreText(int favScore, int oppScore, char outBuf[5]) {
       uint8_t favDigit = (uint8_t)(((favScore < 0) ? 0 : favScore) % 10);
       uint8_t oppDigit = (uint8_t)(((oppScore < 0) ? 0 : oppScore) % 10);
-      snprintf(buf, sizeof(buf), "%u-%u", favDigit, oppDigit);
-      DEBUG_PRINTF("TM1637 Clock: MLB showBaseballScore fav=%s(%d) opp=%s(%d) text=%s\n",
-        fav.c_str(), favScore, opp.c_str(), oppScore, buf);
-      tm1637DisplayShowMessage(buf, 3000);
+      snprintf(outBuf, 5, "%u-%u", favDigit, oppDigit);
+    }
+
+    // Slot provider callback — called by TM1637Display once per cycle rebuild.
+    // Pushes a SLOT_BASEBALL entry when a live game score is available.
+    // Uses SLOT_BASEBALL type so the display can render it distinctly if needed.
+    static void _baseballSlotProvider(SlotQueue& queue) {
+#ifdef USERMOD_BASEBALL_API
+      if (!_instance || !_instance->baseballApi) return;
+      if (!_instance->baseballApi->isGameLive()) return;
+
+      const String& lastScore = _instance->baseballApi->getLastScore();
+      if (lastScore.length() == 0) return;
+
+      String fav, opp;
+      int favScore = 0, oppScore = 0;
+      char buf[5];
+      if (_instance->parseBaseballScore(lastScore, _instance->baseballApi->getFavoriteTeam(),
+                                         fav, favScore, opp, oppScore)) {
+        _buildScoreText(favScore, oppScore, buf);
+        DEBUG_PRINTF("TM1637 Clock: MLB slot provider pushing score '%s'\n", buf);
+      } else {
+        // Parse failure — show unambiguous error marker
+        strncpy(buf, "----", sizeof(buf));
+        DEBUG_PRINTLN(F("TM1637 Clock: MLB slot provider push parse-failure '----'"));
+      }
+      uint16_t dur = tm1637DisplayGetSlotDurationMs();
+      queue.push(SLOT_BASEBALL, dur, buf);
+#endif
     }
 
     // Helper to parse lastScore string and extract team names and scores.
@@ -191,12 +215,15 @@ class TM1637ClockUsermod : public Usermod {
       }
 #endif
 
-      // Check for TM1637 display usermod availability.
-      if (!UsermodManager::lookup(USERMOD_ID_TM1637_DISPLAY)) {
-        DEBUG_PRINTLN(F("TM1637 Clock: TM1637 display usermod not found"));
+      // Register baseball slot provider with the display queue.
+      // The provider is called once per cycle so it can inject a live score
+      // slot without needing any timing logic here.
+      if (!tm1637DisplayAddSlotProvider(_baseballSlotProvider)) {
+        DEBUG_PRINTLN(F("TM1637 Clock: TM1637 display usermod not found or provider table full"));
+      } else {
+        DEBUG_PRINTLN(F("TM1637 Clock: registered baseball slot provider"));
       }
 
-      // Try to find Baseball API usermod (replace USERMOD_ID_BASEBALL_API with actual ID)
       #ifdef USERMOD_BASEBALL_API
       baseballApi = (UsermodBaseballAPI*)UsermodManager::lookup(USERMOD_ID_BASEBALL_API);
       if (!baseballApi) {
@@ -206,42 +233,20 @@ class TM1637ClockUsermod : public Usermod {
     }
 
     void loop() override {
-      static unsigned long lastWeatherCycleEnd = 0;
-      static bool baseballShown = false;
       static unsigned long lastGateLogMs = 0;
       unsigned long nowMs = millis();
 
-      if (!enabled) {
-        if (nowMs - lastGateLogMs > 5000) {
-          DEBUG_PRINTLN(F("TM1637 Clock: MLB gate blocked (TM1637Clock disabled)"));
-          lastGateLogMs = nowMs;
-        }
-        return;
-      }
-
-      // Check WiFi
-      if (WiFi.status() != WL_CONNECTED) {
-        if (nowMs - lastGateLogMs > 5000) {
-          DEBUG_PRINTF("TM1637 Clock: MLB gate blocked (WiFi status=%d)\n", WiFi.status());
-          lastGateLogMs = nowMs;
-        }
-        return;
-      }
+      if (!enabled) return;
+      if (WiFi.status() != WL_CONNECTED) return;
 
       // Check time using WLED's internal synced clock (localTime/toki).
       // Using libc time(nullptr) can report 1970 even when WLED time is valid.
       updateLocalTime();
-      bool timeValid = (localTime >= 1704067200UL && localTime < 4102444800UL); // 2024-01-01 .. 2100-01-01
-      if (!timeValid) {
-        if (nowMs - lastGateLogMs > 5000) {
-          DEBUG_PRINTF("TM1637 Clock: MLB gate blocked (WLED time not valid, localTime=%lu toki=%lu)\n",
-            (unsigned long)localTime, (unsigned long)toki.second());
-          lastGateLogMs = nowMs;
-        }
-      }
+      bool timeValid = (localTime >= 1704067200UL && localTime < 4102444800UL);
 
-      // Check weather — TM1637_Display already shows time; just skip LED/score logic until ready
-      // Re-apply weather-driven LED patterns periodically (every 60s)
+      // Re-apply weather-driven LED patterns periodically.
+      // Baseball score display is now handled entirely by the slot provider
+      // registered in setup(), so no timing state is needed here.
       if (timeValid && weatherFetched && weatherOverrideType > 0 &&
           (nowMs - lastPatternApply > TM1637_PATTERN_APPLY_INTERVAL_MS)) {
       #ifdef USERMOD_BASEBALL_API
@@ -253,62 +258,6 @@ class TM1637ClockUsermod : public Usermod {
         }
       #endif
       }
-
-      #ifdef USERMOD_BASEBALL_API
-      if(baseballApi){
-        static bool prevGameLive = false;
-        bool gameNowLive = baseballApi->isGameLive();
-        if(gameNowLive){
-          if (baseballApi->getLastScore().length() > 0) {
-            if (!baseballShown && (nowMs - lastWeatherCycleEnd > 6000)) {
-              // Parse and display score
-              String fav, opp;
-              int favScore = 0, oppScore = 0;
-              if (parseBaseballScore(baseballApi->getLastScore(), baseballApi->getFavoriteTeam(), fav, favScore, opp, oppScore)) {
-                showBaseballScore(fav, favScore, opp, oppScore);
-                DEBUG_PRINTF("TM1637 Clock: MLB displayed live score %s %d vs %s %d (raw='%s')\n",
-                  fav.c_str(), favScore, opp.c_str(), oppScore, baseballApi->getLastScore().c_str());
-                baseballShown = true;
-                lastWeatherCycleEnd = nowMs;
-              } else {
-                // Parse failed: show a visible failure marker on the 4-digit display.
-                // "----" maps cleanly to TM1637 segments and is unambiguous.
-                DEBUG_PRINTF("TM1637 Clock: MLB parseBaseballScore failed, raw='%s' fav='%s'\n",
-                  baseballApi->getLastScore().c_str(), baseballApi->getFavoriteTeam().c_str());
-                tm1637DisplayShowMessage("----", 3000);
-                DEBUG_PRINTLN(F("TM1637 Clock: MLB displayed parse-failure marker ----"));
-                baseballShown = true;
-                lastWeatherCycleEnd = nowMs;
-              }
-            } else if (baseballShown && (nowMs - lastWeatherCycleEnd > 9000)) {
-              // 3 seconds passed, reset
-              baseballShown = false;
-              lastWeatherCycleEnd = nowMs;
-              DEBUG_PRINTLN(F("TM1637 Clock: MLB reset baseball score display after 3s"));
-            }
-          } else {
-            baseballShown = false;
-            lastWeatherCycleEnd = nowMs;
-            DEBUG_PRINTLN(F("TM1637 Clock: MLB live game but no score available yet, skipping display") );
-          }
-        } else {
-          // Log only once on the live → not-live transition, not every loop tick.
-          if (prevGameLive) {
-            DEBUG_PRINTLN(F("TM1637 Clock: MLB game ended, resuming normal display"));
-          }
-          baseballShown = false;
-        }
-        prevGameLive = gameNowLive;
-        // Show baseball score on TM1637 when a game is live (independent of weather)
-        
-      }else{
-        if (nowMs - lastGateLogMs > 5000) {
-          DEBUG_PRINTLN(F("TM1637 Clock: MLB gate blocked (Baseball API usermod lookup returned null)"));
-          lastGateLogMs = nowMs;
-        }
-      }
-      #endif
-      
     }
 
 

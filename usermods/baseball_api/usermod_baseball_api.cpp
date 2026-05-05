@@ -8,6 +8,46 @@
   #include <HTTPClient.h>
 #endif
 
+// ─── Tunable constants ────────────────────────────────────────────────────────
+
+// API base URLs
+#define BASEBALL_API_SCHEDULE_URL   "http://statsapi.mlb.com/api/v1/schedule"
+#define BASEBALL_API_LIVE_URL_BASE  "http://statsapi.mlb.com/api/v1.1/game/"
+#define BASEBALL_API_LIVE_URL_TAIL  "/feed/live"
+
+// HTTP request timeout (ms)
+#define BASEBALL_HTTP_TIMEOUT_MS    7000
+
+// Poll intervals (ms)
+#define BASEBALL_INTERVAL_DEFAULT   600000UL  // 10 min  — startup / no team selected
+#define BASEBALL_INTERVAL_LIVE      7000UL    // 7 s     — game currently in progress
+#define BASEBALL_INTERVAL_IMMINENT  30000UL   // 30 s    — game starts within 15 min
+#define BASEBALL_INTERVAL_NEAR      60000UL   // 1 min   — game starts within 1 hr
+#define BASEBALL_INTERVAL_SOON      120000UL  // 2 min   — game starts within 3 hrs
+#define BASEBALL_INTERVAL_FAR       300000UL  // 5 min   — game starts > 3 hrs away
+#define BASEBALL_INTERVAL_IDLE      900000UL  // 15 min  — no game in schedule window
+#define BASEBALL_INTERVAL_NOSYNC    10000UL   // 10 s    — clock not synced yet, retry
+
+// Upcoming-game poll thresholds (seconds before game start)
+#define BASEBALL_THRESH_IMMINENT_S  900       // <15 min  → IMMINENT interval
+#define BASEBALL_THRESH_NEAR_S      3600      // <1 hr    → NEAR interval
+#define BASEBALL_THRESH_SOON_S      10800     // <3 hrs   → SOON interval
+
+// Live-game detection window (seconds relative to scheduled start)
+#define BASEBALL_LIVE_WINDOW_PAST_S   21600   // 6 hrs back  — long/extra-inning games
+#define BASEBALL_LIVE_WINDOW_FUTURE_S 1800    // 30 min fwd  — pre-game override window
+
+// Clock sanity range (Unix timestamps: 2024-01-01 .. 2100-01-01)
+#define BASEBALL_CLOCK_MIN_TS  1704067200UL
+#define BASEBALL_CLOCK_MAX_TS  4102444800UL
+
+// ArduinoJSON document sizes
+#define BASEBALL_JSON_FILTER_SIZE       512
+#define BASEBALL_JSON_LIVE_DOC_SIZE     1024
+#define BASEBALL_JSON_SCHEDULE_DOC_SIZE 6144
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 class UsermodBaseballAPI : public Usermod {
   private:
     static const uint32_t TEAM_COLOR_BLANK = 0xFFFFFFFF;
@@ -16,7 +56,7 @@ class UsermodBaseballAPI : public Usermod {
     bool enabled = false;
     bool initDone = false;
     unsigned long lastFetch = 0;
-    unsigned long intervalMs = 600000; // Default 10 minutes
+    unsigned long intervalMs = BASEBALL_INTERVAL_DEFAULT;
     bool wasConnected = false;
     
     // Configuration variables
@@ -180,7 +220,7 @@ class UsermodBaseballAPI : public Usermod {
 
     bool _hasValidClock() const {
       updateLocalTime();
-      return localTime >= 1704067200 && localTime < 4102444800; // 2024-01-01 .. 2100-01-01
+      return localTime >= BASEBALL_CLOCK_MIN_TS && localTime < BASEBALL_CLOCK_MAX_TS; // 2024-01-01 .. 2100-01-01
     }
 
     time_t _currentUtcApprox() const {
@@ -231,28 +271,28 @@ class UsermodBaseballAPI : public Usermod {
 
     unsigned long _upcomingPollInterval(time_t gameUtcTime) const {
       time_t currentUtc = _currentUtcApprox();
-      if (gameUtcTime <= currentUtc + 900) return 30000;
-      if (gameUtcTime <= currentUtc + 3600) return 60000;
-      if (gameUtcTime <= currentUtc + 10800) return 120000;
-      return 300000;
+      if (gameUtcTime <= currentUtc + BASEBALL_THRESH_IMMINENT_S) return BASEBALL_INTERVAL_IMMINENT;
+      if (gameUtcTime <= currentUtc + BASEBALL_THRESH_NEAR_S)      return BASEBALL_INTERVAL_NEAR;
+      if (gameUtcTime <= currentUtc + BASEBALL_THRESH_SOON_S)      return BASEBALL_INTERVAL_SOON;
+      return BASEBALL_INTERVAL_FAR;
     }
 
-    bool _isLiveState(const String& abstractState, const String& detailedState, const String& codedState) const {
-      return (abstractState == "Live") ||
-             (codedState == "I") ||
-             (codedState == "M") ||
-             (detailedState.indexOf("In Progress") >= 0);
+    bool _isLiveState(const String& abstractState, const String& codedState) const {
+      // "M" = manager challenge (mid-inning stoppage), still a live game.
+      // detailedState "In Progress" is fully covered by these two fields.
+      return (abstractState == "Live") || (codedState == "I") || (codedState == "M");
     }
 
-    bool _isFinalState(const String& abstractState, const String& detailedState, const String& codedState) const {
-      return (abstractState == "Final") || (codedState == "F") || (detailedState == "Final");
+    bool _isFinalState(const String& abstractState, const String& codedState) const {
+      // detailedState "Final" is fully covered by abstractGameState and codedGameState.
+      return (abstractState == "Final") || (codedState == "F");
     }
 
     bool _isGameHappeningNow(time_t nowUtc, time_t gameUtcTime) const {
       // Consider a game "happening now" if its scheduled start time is within:
       //   - up to 6 hours in the past  (covers long/extra-inning games in progress)
       //   - up to 30 minutes in the future (pre-game window so override applies before first pitch)
-      return gameUtcTime >= (nowUtc - 21600) && gameUtcTime <= (nowUtc + 1800);
+      return gameUtcTime >= (nowUtc - BASEBALL_LIVE_WINDOW_PAST_S) && gameUtcTime <= (nowUtc + BASEBALL_LIVE_WINDOW_FUTURE_S);
     }
 
     String _formatUtcDebug(time_t t) const {
@@ -281,7 +321,7 @@ class UsermodBaseballAPI : public Usermod {
 
     String _buildScheduleUrl(int mlbId) const {
       if (mlbId <= 0) return "";
-      String url = "http://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=" + String(mlbId);
+      String url = BASEBALL_API_SCHEDULE_URL "?sportId=1&teamId=" + String(mlbId);
       // Start 1 day back (UTC) so games that began UTC-yesterday but are still
       // in progress (e.g. late-night games past midnight UTC) are included.
       String startDate = _buildDateYmd(-1);
@@ -289,13 +329,24 @@ class UsermodBaseballAPI : public Usermod {
       if (startDate.length() > 0 && endDate.length() > 0) {
         url += "&startDate=" + startDate + "&endDate=" + endDate;
       }
-      url += "&fields=dates,date,games,gamePk,gameDate,status,abstractGameState,detailedState,codedGameState,teams,home,away,score,team,name";
+      // `date` (the per-date-object date string, e.g. "2026-05-04") is excluded —
+      // only d["games"] is accessed per date object; d["date"] is never read.
+      // `detailedState` (e.g. "In Progress", "Scheduled", "Final") is excluded —
+      // abstractGameState ("Live"/"Final"/"Preview") and codedGameState ("I"/"M"/"F"/"S")
+      // fully cover every check; detailedState is redundant.
+      url += "&fields=dates,games,gamePk,gameDate,status,abstractGameState,codedGameState,teams,home,away,score,team,name";
       return url;
     }
 
     String _buildLiveDataUrl(int gamePk) const {
       if (gamePk <= 0) return "";
-      String url = "http://statsapi.mlb.com/api/v1.1/game/" + String(gamePk) + "/feed/live";
+      // Fields required to replicate schedule-API score data plus inning/count info.
+      // gameData: game state + team names; liveData/linescore: inning, half, runs, balls/strikes/outs.
+      String url = BASEBALL_API_LIVE_URL_BASE + String(gamePk) +
+                   BASEBALL_API_LIVE_URL_TAIL "?fields=gameData,status,abstractGameState,codedGameState"
+                   ",teams,away,home,name"
+                   ",liveData,linescore,currentInning,currentInningOrdinal,inningState"
+                   ",balls,strikes,outs,runs";
       DEBUG_PRINTF("BaseballAPI: live data URL=%s\n", url.c_str());
       return url;
     }
@@ -382,6 +433,152 @@ class UsermodBaseballAPI : public Usermod {
       return "Unavailable";
     }
 
+    void _fetchSchedule() {
+      int mlbId = _resolveMlbId();
+      if (mlbId <= 0) {
+        nextGameInfo = "Team unavailable";
+        lastFetchError = "Invalid MLB team id";
+        lastHttpCode = 0;
+        DEBUG_PRINTF("BaseballAPI: invalid favorite team id '%s'\n", favoriteTeam.c_str());
+        return;
+      }
+
+      String url = _buildScheduleUrl(mlbId);
+      DEBUG_PRINTF("BaseballAPI: schedule URL=%s\n", url.c_str());
+      lastRequestUrl = url;
+      lastFetchError = "";
+      lastHttpCode = 0;
+
+      WiFiClient client;
+      HTTPClient http;
+      http.setTimeout(BASEBALL_HTTP_TIMEOUT_MS);
+
+      if (!http.begin(client, url)) {
+        lastFetchError = "HTTP begin failed";
+        nextGameInfo = "Request setup failed";
+        DEBUG_PRINTF("BaseballAPI: http.begin failed url=%s\n", url.c_str());
+        return;
+      }
+
+      int httpCode = http.GET();
+      lastHttpCode = httpCode;
+      if (httpCode == HTTP_CODE_OK) {
+        _parseMLB(http.getStream());
+      } else {
+        nextGameInfo = "HTTP " + String(httpCode);
+        lastFetchError = nextGameInfo;
+        DEBUG_PRINTF("BaseballAPI: HTTP GET failed code=%d url=%s\n", httpCode, url.c_str());
+        if (gameLive && overrideLightsOnGame) _restoreGameOverride();
+        gameLive = false;
+      }
+
+      http.end();
+    }
+
+    void _fetchLiveFeed() {
+      String url = _buildLiveDataUrl(liveGamePk);
+      lastRequestUrl = url;
+      lastFetchError = "";
+      lastHttpCode = 0;
+
+      WiFiClient client;
+      HTTPClient http;
+      http.setTimeout(BASEBALL_HTTP_TIMEOUT_MS);
+
+      if (!http.begin(client, url)) {
+        lastFetchError = "HTTP begin failed (live)";
+        DEBUG_PRINTF("BaseballAPI: http.begin failed url=%s\n", url.c_str());
+        return;
+      }
+
+      int httpCode = http.GET();
+      lastHttpCode = httpCode;
+      if (httpCode == HTTP_CODE_OK) {
+        _parseLiveFeed(http.getStream());
+      } else {
+        lastFetchError = "HTTP " + String(httpCode) + " (live)";
+        DEBUG_PRINTF("BaseballAPI: live feed HTTP GET failed code=%d url=%s\n", httpCode, url.c_str());
+      }
+
+      http.end();
+    }
+
+    // Parse a feed/live response. Updates lastScore with score + inning/count data.
+    // Sets gameLive=false and clears liveGamePk when game reaches Final state.
+    void _parseLiveFeed(Stream& stream) {
+      StaticJsonDocument<BASEBALL_JSON_FILTER_SIZE> filter;
+      filter["gameData"]["status"]["abstractGameState"] = true;
+      filter["gameData"]["status"]["codedGameState"]    = true;
+      filter["gameData"]["teams"]["away"]["name"]       = true;
+      filter["gameData"]["teams"]["home"]["name"]       = true;
+      filter["liveData"]["linescore"]["currentInningOrdinal"] = true;
+      filter["liveData"]["linescore"]["inningState"]    = true;
+      filter["liveData"]["linescore"]["balls"]                    = true;
+      filter["liveData"]["linescore"]["strikes"]              = true;
+      filter["liveData"]["linescore"]["outs"]                 = true;
+      filter["liveData"]["linescore"]["teams"]["away"]["runs"] = true;
+      filter["liveData"]["linescore"]["teams"]["home"]["runs"] = true;
+
+      DynamicJsonDocument doc(BASEBALL_JSON_LIVE_DOC_SIZE);
+      DeserializationError err = deserializeJson(doc, stream, DeserializationOption::Filter(filter));
+      if (err) {
+        lastFetchError = err.c_str();
+        DEBUG_PRINTF("BaseballAPI: live feed JSON parse failed: %s\n", err.c_str());
+        return;
+      }
+
+      String abstractState = doc["gameData"]["status"]["abstractGameState"].as<String>();
+      String codedState    = doc["gameData"]["status"]["codedGameState"].as<String>();
+      String away          = doc["gameData"]["teams"]["away"]["name"].as<String>();
+      String home          = doc["gameData"]["teams"]["home"]["name"].as<String>();
+      int    aScore        = doc["liveData"]["linescore"]["teams"]["away"]["runs"] | -1;
+      int    hScore        = doc["liveData"]["linescore"]["teams"]["home"]["runs"] | -1;
+
+      if (_isFinalState(abstractState, codedState)) {
+        if (aScore >= 0 && hScore >= 0) {
+          lastScore = away + " " + String(aScore) + " @ " + home + " " + String(hScore) + " (Final)";
+        }
+        if (overrideLightsOnGame) _restoreGameOverride();
+        gameLive = false;
+        liveGamePk = 0;
+        lastLiveDataUrl = "";
+        DEBUG_PRINTLN(F("BaseballAPI: live feed reports game Final"));
+        return;
+      }
+
+      if (!_isLiveState(abstractState, codedState)) {
+        // Unexpected state (Suspended, Postponed, etc.) — don't change gameLive;
+        // schedule fetch will resolve it on the next non-live poll.
+        DEBUG_PRINTF("BaseballAPI: live feed unexpected state='%s' coded='%s'\n",
+          abstractState.c_str(), codedState.c_str());
+        return;
+      }
+
+      // Game still live — build score string with inning and count.
+      String inningOrdinal = doc["liveData"]["linescore"]["currentInningOrdinal"].as<String>();
+      String inningState   = doc["liveData"]["linescore"]["inningState"].as<String>();
+      int    balls         = doc["liveData"]["linescore"]["balls"]   | -1;
+      int    strikes       = doc["liveData"]["linescore"]["strikes"] | -1;
+      int    outs          = doc["liveData"]["linescore"]["outs"]    | -1;
+
+      if (aScore >= 0 && hScore >= 0) {
+        lastScore = away + " " + String(aScore) + " @ " + home + " " + String(hScore);
+        if (inningOrdinal.length() > 0 && inningState.length() > 0) {
+          lastScore += " (" + inningState + " " + inningOrdinal;
+          if (balls >= 0 && strikes >= 0 && outs >= 0) {
+            lastScore += ", " + String(balls) + "-" + String(strikes) + ", " + String(outs) + " out";
+            if (outs != 1) lastScore += "s";
+          }
+          lastScore += ")";
+        }
+      } else {
+        lastScore = away + " @ " + home + " (Live)";
+      }
+
+      lastFetchError = "";
+      DEBUG_PRINTF("BaseballAPI: live feed score: %s\n", lastScore.c_str());
+    }
+
     void _doFetch() {
       if (favoriteTeam.length() == 0) {
         DEBUG_PRINTLN(F("BaseballAPI: fetch skipped, no favorite team selected"));
@@ -397,60 +594,40 @@ class UsermodBaseballAPI : public Usermod {
       if (!_hasValidClock()) {
         DEBUG_PRINTF("BaseballAPI: fetch skipped, clock not valid (toki=%lu)\n", (unsigned long)toki.second());
         lastFetchError = "Clock not synced";
-        intervalMs = 10000; // retry every 10s until clock syncs
+        intervalMs = BASEBALL_INTERVAL_NOSYNC; // retry until clock syncs
         lastFetch = millis();
         return;
       }
 
-      int mlbId = _resolveMlbId();
-      if (mlbId <= 0) {
-        nextGameInfo = "Team unavailable";
-        lastFetchError = "Invalid MLB team id";
-        lastHttpCode = 0;
-        DEBUG_PRINTF("BaseballAPI: invalid favorite team id '%s'\n", favoriteTeam.c_str());
-        lastFetch = millis();
-        return;
+      if (gameLive && liveGamePk > 0) {
+        _fetchLiveFeed();
+        if (gameLive) {
+          lastFetch = millis();
+          return; // still live — poll again at next 7s interval
+        }
+        // game ended — fall through to refresh schedule for next game
       }
 
-      String url = _buildScheduleUrl(mlbId);
-      DEBUG_PRINTF("BaseballAPI: schedule URL=%s\n", url.c_str());
-      lastRequestUrl = url;
-      lastFetchError = "";
-      lastHttpCode = 0;
-
-      WiFiClient client;
-      HTTPClient http;
-      http.setTimeout(7000);
-
-      if (!http.begin(client, url)) {
-        lastFetchError = "HTTP begin failed";
-        nextGameInfo = "Request setup failed";
-        DEBUG_PRINTF("BaseballAPI: http.begin failed url=%s\n", url.c_str());
-        lastFetch = millis();
-        return;
-      }
-
-      int httpCode = http.GET();
-      lastHttpCode = httpCode;
-      if (httpCode == HTTP_CODE_OK) {
-        String payload = http.getString();
-        if (payload.length() == 0) DEBUG_PRINTF("BaseballAPI: empty HTTP payload, url=%s\n", url.c_str());
-        _parseMLB(payload);
-      } else {
-        nextGameInfo = "HTTP " + String(httpCode);
-        lastFetchError = nextGameInfo;
-        DEBUG_PRINTF("BaseballAPI: HTTP GET failed code=%d url=%s\n", httpCode, url.c_str());
-        if (gameLive && overrideLightsOnGame) _restoreGameOverride();
-        gameLive = false;
-      }
-
-      http.end();
+      _fetchSchedule();
       lastFetch = millis();
     }
 
-    void _parseMLB(const String& json) {
-      DynamicJsonDocument doc(6144);
-      DeserializationError err = deserializeJson(doc, json);
+    void _parseMLB(Stream& stream) {
+      // Build a filter so only the fields we actually use are stored in the
+      // parsed document. This dramatically reduces RAM usage on ESP8266 versus
+      // parsing the full schedule payload. 512 bytes is enough for the filter tree.
+      StaticJsonDocument<BASEBALL_JSON_FILTER_SIZE> filter;
+      filter["dates"][0]["games"][0]["gamePk"] = true;
+      filter["dates"][0]["games"][0]["gameDate"] = true;
+      filter["dates"][0]["games"][0]["status"]["abstractGameState"] = true;
+      filter["dates"][0]["games"][0]["status"]["codedGameState"] = true;
+      filter["dates"][0]["games"][0]["teams"]["home"]["score"] = true;
+      filter["dates"][0]["games"][0]["teams"]["home"]["team"]["name"] = true;
+      filter["dates"][0]["games"][0]["teams"]["away"]["score"] = true;
+      filter["dates"][0]["games"][0]["teams"]["away"]["team"]["name"] = true;
+
+      DynamicJsonDocument doc(BASEBALL_JSON_SCHEDULE_DOC_SIZE);
+      DeserializationError err = deserializeJson(doc, stream, DeserializationOption::Filter(filter));
       if (err) {
         nextGameInfo = "JSON parse failed";
         lastFetchError = err.c_str();
@@ -465,7 +642,7 @@ class UsermodBaseballAPI : public Usermod {
         DEBUG_PRINTLN(F("BaseballAPI: no dates array in MLB response"));
         if (gameLive && overrideLightsOnGame) _restoreGameOverride();
         gameLive = false;
-        intervalMs = 900000;
+        intervalMs = BASEBALL_INTERVAL_IDLE;
         return;
       }
 
@@ -495,7 +672,6 @@ class UsermodBaseballAPI : public Usermod {
         if (games.isNull()) continue;
         for (JsonObject game : games) {
           String state = game["status"]["abstractGameState"].as<String>();
-          String detailed = game["status"]["detailedState"].as<String>();
           String coded = game["status"]["codedGameState"].as<String>();
           int gamePk = game["gamePk"] | 0;
           String home = game["teams"]["home"]["team"]["name"].as<String>();
@@ -509,8 +685,8 @@ class UsermodBaseballAPI : public Usermod {
           bool gameInLiveWindow = clockValid && hasGameUtc && _isGameHappeningNow(nowUtc, gameUtcTime);
 
           if (hasGameUtc) {
-            time_t liveWindowStartUtc = nowUtc - 1800;
-            time_t liveWindowEndUtc = nowUtc + 21600;
+            time_t liveWindowStartUtc = nowUtc - BASEBALL_LIVE_WINDOW_FUTURE_S;
+            time_t liveWindowEndUtc = nowUtc + BASEBALL_LIVE_WINDOW_PAST_S;
             DEBUG_PRINTF("BaseballAPI: gamePk=%d UTC window %ld (%s) <= gameStart=%ld (%s) <= %ld (%s), inWindow=%d\n",
               gamePk,
               (long)liveWindowStartUtc,
@@ -527,16 +703,16 @@ class UsermodBaseballAPI : public Usermod {
 
           if (gameInLiveWindow) sawAnyStartedGame = true;
 
-          bool isLiveState = _isLiveState(state, detailed, coded) && gameInLiveWindow;
-          bool isFinalState = _isFinalState(state, detailed, coded);
+          bool isLiveState = _isLiveState(state, coded) && gameInLiveWindow;
+          bool isFinalState = _isFinalState(state, coded);
 
           if (liveGamePk > 0 && gamePk == liveGamePk) {
             if (isLiveState) sawActiveLiveState = true;
             if (isFinalState) sawActiveFinalState = true;
           }
 
-          DEBUG_PRINTF("BaseballAPI: gamePk=%d state='%s' detailed='%s' coded='%s' live=%d %s @ %s\n",
-            gamePk, state.c_str(), detailed.c_str(), coded.c_str(), isLiveState, away.c_str(), home.c_str());
+          DEBUG_PRINTF("BaseballAPI: gamePk=%d state='%s' coded='%s' live=%d %s @ %s\n",
+            gamePk, state.c_str(), coded.c_str(), isLiveState, away.c_str(), home.c_str());
 
           if (isLiveState) {
             if (hScore >= 0 && aScore >= 0) {
@@ -550,11 +726,11 @@ class UsermodBaseballAPI : public Usermod {
             break;
           }
 
-          if (!foundUpcoming && (state == "Preview" || detailed == "Scheduled" || state == "Pre-Game")) {
+          if (!foundUpcoming && (state == "Preview" || state == "Pre-Game")) {
             upAway = away;
             upHome = home;
             upDate = _formatApiUtcToLocal(gameDate);
-            upState = (detailed.length() > 0) ? detailed : state;
+            upState = state;
             upLiveUrl = _buildLiveDataUrl(gamePk);
             _parseApiUtc(gameDate, upcomingUtcTime);
             foundUpcoming = true;
@@ -570,7 +746,7 @@ class UsermodBaseballAPI : public Usermod {
       if (foundLive) {
         if (!wasLive && overrideLightsOnGame) _applyGameOverride();
         gameLive = true;
-        intervalMs = 30000;
+        intervalMs = BASEBALL_INTERVAL_LIVE;
         lastFetchError = "";
         if (lastLiveDataUrl.length() > 0) {
           DEBUG_PRINTF("BaseballAPI: live data URL %s\n", lastLiveDataUrl.c_str());
@@ -587,7 +763,7 @@ class UsermodBaseballAPI : public Usermod {
                                 !sawActiveFinalState &&
                                 !sawAnyStartedGame;
       if (uncertainLiveState) {
-        intervalMs = 30000;
+        intervalMs = BASEBALL_INTERVAL_LIVE;
         lastFetchError = "";
         DEBUG_PRINTF("BaseballAPI: holding live state for gamePk=%d (only future games in schedule window)\n", liveGamePk);
         return;
@@ -605,7 +781,7 @@ class UsermodBaseballAPI : public Usermod {
       } else {
         nextGameInfo = "No upcoming game in window";
         lastLiveDataUrl = "";
-        intervalMs = 900000;
+        intervalMs = BASEBALL_INTERVAL_IDLE;
         lastFetchError = "No Preview/Scheduled game found";
         DEBUG_PRINTLN(F("BaseballAPI: no live game and no Preview/Scheduled game found in window"));
       }

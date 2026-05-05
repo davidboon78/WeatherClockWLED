@@ -73,7 +73,7 @@ private:
   String _buildStatusValue() const;
 
   void _doFetch();
-  void _parseMLB(const String& json);
+  void _parseMLB(Stream& stream);
   void _applyGameOverride();
   void _restoreGameOverride();
 
