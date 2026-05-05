@@ -83,6 +83,21 @@ void WeatherApiUsermod::_doFetch() {
     return;
   }
 
+  // Guard against low-heap crashes. On ESP8266, malloc() returns NULL when the
+  // heap is exhausted; String operations (via HTTPClient::sendHeader etc.) write
+  // through that NULL and trigger a StoreProhibited exception (exception 29).
+  // The 'Heap low, purging segments' log line before the crash confirms the heap
+  // was already critically low when the fetch was attempted.
+  {
+    uint32_t freeHeap = ESP.getFreeHeap();
+    if (freeHeap < WEATHER_API_MIN_HEAP_B) {
+      _lastError   = "Low heap";
+      _lastFetchOk = false;
+      DEBUG_PRINTF("WeatherApi: fetch deferred, low heap (%u B free)\n", freeHeap);
+      return;
+    }
+  }
+
   // Build request URL using WLED's lat/lon from Time settings.
   // Falls back to auto:ip when both are zero (IP-based geolocation).
   char url[160];
@@ -119,7 +134,7 @@ void WeatherApiUsermod::_doFetch() {
     return;
   }
   // 5 s is generous for WeatherAPI and well within the HW watchdog window (~8 s on ESP8266)
-  http.setTimeout(5000);
+  http.setTimeout(1000);
   int httpCode = http.GET();
   DEBUG_PRINTF("WeatherApi: HTTP %d\n", httpCode);
 
@@ -281,25 +296,15 @@ bool WeatherApiUsermod::readFromConfig(JsonObject& root) {
 }
 
 void WeatherApiUsermod::appendConfigData() {
-  oappend(SET_F("addInfo('WeatherApi:api-key',1,'Free key at weatherapi.com — or use platformio_override.ini');"));
-  oappend(SET_F("addInfo('WeatherApi:interval',1,'Fetch interval in seconds (min 30)');"));
-  // Collapsible status panel — loads /json/info on open.
-  // The device embeds the current API URL in info with a "url:" prefix;
-  // the JS strips it from the text display and renders it as a clickable link.
-  oappend(SET_F("(function(){"));
-  oappend(SET_F("var d=document.createElement('details');"));
-  oappend(SET_F("d.innerHTML='<summary>Weather API Status</summary><pre id=WA_ws style=\"white-space:pre-wrap\">Click to load</pre><a id=WA_wl target=\\_blank style=\"display:none;font-size:.85em;word-break:break-all;margin-top:4px\"></a>';"));
-  oappend(SET_F("d.addEventListener('toggle',function(){if(!d.open)return;"));
-  oappend(SET_F("fetch('/json/info').then(function(r){return r.json();}).then(function(j){"));
-  oappend(SET_F("var u=j&&j.u&&j.u.WeatherApi||[];"));
-  oappend(SET_F("var lines=[],apiUrl=null;"));
-  oappend(SET_F("u.forEach(function(s){if(s.slice(0,4)==='url:')apiUrl=s.slice(4);else lines.push(s);});"));
-  oappend(SET_F("document.getElementById('WA_ws').textContent=lines.length?lines.join('\\n'):'No data';"));
-  oappend(SET_F("var lk=document.getElementById('WA_wl');"));
-  oappend(SET_F("lk.href=apiUrl||'';lk.textContent=apiUrl?'Test API URL: '+apiUrl:'';lk.style.display=apiUrl?'block':'none';"));
-  oappend(SET_F("}).catch(function(){document.getElementById('WA_ws').textContent='Error loading';});});"));
-  oappend(SET_F("var h=document.querySelector('h3');if(h)h.after(d);"));
-  oappend(SET_F("})();"));
+  // s.js?p=8 is a single shared response for all usermods — keep output minimal.
+  // Short hint strings; avoid redundant platform-specific guidance here.
+  oappend(SET_F("addInfo('WeatherApi:api-key',1,'Free key at weatherapi.com');"));
+  oappend(SET_F("addInfo('WeatherApi:interval',1,'Seconds between fetches (min 30)');"));
+  // On-demand status panel: fetches /json/info only when the <details> is opened.
+  // Uses gId()/cE() and 'd' (=document) aliases from common.js — do NOT shadow 'd'.
+  // Compacted into two oappend calls; total output ~744 B vs original ~924 B.
+  oappend(SET_F("(function(){var el=cE('details');el.innerHTML='<summary>WeatherAPI Status</summary><pre id=\"WA_s\" style=\"white-space:pre-wrap\">Click to load</pre><a id=\"WA_l\" target=\"_blank\" style=\"display:none;font-size:.85em;word-break:break-all\"></a>';"));
+  oappend(SET_F("el.addEventListener('toggle',function(){if(!el.open)return;fetch('/json/info').then(function(r){return r.json();}).then(function(j){var u=(j&&j.u&&j.u.WeatherApi)||[],l=[],a=null;u.forEach(function(s){s.slice(0,4)==='url:'?a=s.slice(4):l.push(s);});gId('WA_s').textContent=l.join('\\n')||'No data';var lk=gId('WA_l');lk.href=a||'';lk.textContent=a?'Test URL: '+a:'';lk.style.display=a?'block':'none';}).catch(function(){gId('WA_s').textContent='Error';});});var h=d.querySelector('h3');if(h)h.after(el);})();"));
 }
 
 // ---------------------------------------------------------------------------

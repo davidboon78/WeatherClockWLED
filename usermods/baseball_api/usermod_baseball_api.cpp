@@ -15,18 +15,22 @@
 #define BASEBALL_API_LIVE_URL_BASE  "http://statsapi.mlb.com/api/v1.1/game/"
 #define BASEBALL_API_LIVE_URL_TAIL  "/feed/live"
 
-// HTTP request timeout (ms)
-#define BASEBALL_HTTP_TIMEOUT_MS    7000
+// HTTP request timeout (ms).
+// MLB Stats API typically responds in 200-300ms but can spike to 3-4 s under load.
+// 5 s matches WeatherAPI usermod and gives headroom without long blocking.
+// TCP is closed (http.end()) BEFORE JSON parse so the socket is released promptly.
+// Do NOT raise above ~8 s — longer values starve ESPAsyncWebServer's response queue.
+#define BASEBALL_HTTP_TIMEOUT_MS    1000
 
 // Poll intervals (ms)
-#define BASEBALL_INTERVAL_DEFAULT   600000UL  // 10 min  — startup / no team selected
-#define BASEBALL_INTERVAL_LIVE      7000UL    // 7 s     — game currently in progress
-#define BASEBALL_INTERVAL_IMMINENT  30000UL   // 30 s    — game starts within 15 min
-#define BASEBALL_INTERVAL_NEAR      60000UL   // 1 min   — game starts within 1 hr
-#define BASEBALL_INTERVAL_SOON      120000UL  // 2 min   — game starts within 3 hrs
-#define BASEBALL_INTERVAL_FAR       300000UL  // 5 min   — game starts > 3 hrs away
-#define BASEBALL_INTERVAL_IDLE      900000UL  // 15 min  — no game in schedule window
-#define BASEBALL_INTERVAL_NOSYNC    10000UL   // 10 s    — clock not synced yet, retry
+#define BASEBALL_INTERVAL_DEFAULT   600000UL  // 10 min   — startup / no team selected
+#define BASEBALL_INTERVAL_LIVE      8000UL    // 8 s      — game currently in progress
+#define BASEBALL_INTERVAL_IMMINENT  60000UL   // 1 min    — game starts within 15 min
+#define BASEBALL_INTERVAL_NEAR      1500000UL // 25 min   — game starts within 1 hr
+#define BASEBALL_INTERVAL_SOON      1500000UL // 25 min   — game starts within 3 hrs
+#define BASEBALL_INTERVAL_FAR       1500000UL // 25 min   — game starts > 3 hrs away
+#define BASEBALL_INTERVAL_IDLE      9000000UL // 2.5 hrs  — no game in schedule window
+#define BASEBALL_INTERVAL_NOSYNC    10000UL   // 10 s     — clock not synced yet, retry
 
 // Upcoming-game poll thresholds (seconds before game start)
 #define BASEBALL_THRESH_IMMINENT_S  900       // <15 min  → IMMINENT interval
@@ -44,7 +48,21 @@
 // ArduinoJSON document sizes
 #define BASEBALL_JSON_FILTER_SIZE       512
 #define BASEBALL_JSON_LIVE_DOC_SIZE     1024
-#define BASEBALL_JSON_SCHEDULE_DOC_SIZE 6144
+// Schedule doc: after field-filtering, 4–6 games × ~400 B each ≈ 2–2.5 KB.
+// 3072 gives a comfortable margin and saves 3 KB vs the old 6144 allocation.
+#define BASEBALL_JSON_SCHEDULE_DOC_SIZE 3072
+
+// Minimum free heap (bytes) required before issuing an HTTP fetch.
+// Below these thresholds, allocating the JSON document + HTTP buffers risks
+// crashing the web server or causing an OOM reboot on ESP8266 (~25 KB heap).
+//   Live feed  : 1 KB doc + body String ~400 B + stack filter = ~2 KB peak → guard at 4 KB
+//   Schedule   : 3 KB doc + body String ~800 B + stack filter = ~4 KB peak → guard at 6 KB
+// http.getString() reads the already-field-filtered MLB response, which is small.
+#define BASEBALL_MIN_HEAP_LIVE_B      4000    // bytes free required for live feed fetch
+#define BASEBALL_MIN_HEAP_SCHEDULE_B  6000    // bytes free required for schedule fetch
+
+// How long to wait before retrying when a fetch is deferred due to low heap.
+#define BASEBALL_INTERVAL_HEAP_DEFER  5000UL  // 5 s
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -68,10 +86,12 @@ class UsermodBaseballAPI : public Usermod {
     int liveGamePk = 0;
     String lastScore = "No data";
     String nextGameInfo = "";
-    String lastRequestUrl = "";
-    String lastLiveDataUrl = "";
     String lastFetchError = "";
     int lastHttpCode = 0;
+    // gamePk of the next upcoming (Preview/Pre-Game) game; used on-demand in addToJsonInfo
+    // for the LiveDataURL debug entry.  Stored as int (4 B) instead of the full URL String
+    // (~250 B heap) to keep the ESP8266 free heap above the web-server acceptance threshold.
+    int upcomingGamePk = 0;
     
     // Save/Restore light state
     uint8_t savedMode = 0, savedPalette = 0, savedSpeed = 128, savedIntensity = 128;
@@ -204,6 +224,14 @@ class UsermodBaseballAPI : public Usermod {
       if (teamPaletteIndex >= (int)customPalettes.size()) {
         teamPaletteIndex = -1;
       }
+
+      // If the palette slot is already valid and named, nothing to do.
+      // _removeTeamPalette() clears teamPaletteName, so this acts as the
+      // "dirty" flag.  Without this guard, _loadPaletteColors and the
+      // String allocation in _buildTeamPaletteName run on every loop()
+      // tick, causing continuous heap churn that eventually causes a
+      // malloc() NULL return and a StoreProhibited crash at the assignment.
+      if (teamPaletteIndex >= 0 && teamPaletteName.length() > 0) return;
 
       if (teamPaletteIndex < 0) {
         if (customPalettes.size() >= WLED_MAX_CUSTOM_PALETTES) {
@@ -445,7 +473,6 @@ class UsermodBaseballAPI : public Usermod {
 
       String url = _buildScheduleUrl(mlbId);
       DEBUG_PRINTF("BaseballAPI: schedule URL=%s\n", url.c_str());
-      lastRequestUrl = url;
       lastFetchError = "";
       lastHttpCode = 0;
 
@@ -462,8 +489,13 @@ class UsermodBaseballAPI : public Usermod {
 
       int httpCode = http.GET();
       lastHttpCode = httpCode;
+      String body;
       if (httpCode == HTTP_CODE_OK) {
-        _parseMLB(http.getStream());
+        body = http.getString(); // read body while connection open
+      }
+      http.end(); // release TCP connection before heavy JSON parse
+      if (httpCode == HTTP_CODE_OK) {
+        _parseMLB(body);
       } else {
         nextGameInfo = "HTTP " + String(httpCode);
         lastFetchError = nextGameInfo;
@@ -471,13 +503,10 @@ class UsermodBaseballAPI : public Usermod {
         if (gameLive && overrideLightsOnGame) _restoreGameOverride();
         gameLive = false;
       }
-
-      http.end();
     }
 
     void _fetchLiveFeed() {
       String url = _buildLiveDataUrl(liveGamePk);
-      lastRequestUrl = url;
       lastFetchError = "";
       lastHttpCode = 0;
 
@@ -493,19 +522,22 @@ class UsermodBaseballAPI : public Usermod {
 
       int httpCode = http.GET();
       lastHttpCode = httpCode;
+      String body;
       if (httpCode == HTTP_CODE_OK) {
-        _parseLiveFeed(http.getStream());
+        body = http.getString(); // read body while connection open
+      }
+      http.end(); // release TCP connection before JSON parse
+      if (httpCode == HTTP_CODE_OK) {
+        _parseLiveFeed(body);
       } else {
         lastFetchError = "HTTP " + String(httpCode) + " (live)";
         DEBUG_PRINTF("BaseballAPI: live feed HTTP GET failed code=%d url=%s\n", httpCode, url.c_str());
       }
-
-      http.end();
     }
 
     // Parse a feed/live response. Updates lastScore with score + inning/count data.
     // Sets gameLive=false and clears liveGamePk when game reaches Final state.
-    void _parseLiveFeed(Stream& stream) {
+    void _parseLiveFeed(const String& body) {
       StaticJsonDocument<BASEBALL_JSON_FILTER_SIZE> filter;
       filter["gameData"]["status"]["abstractGameState"] = true;
       filter["gameData"]["status"]["codedGameState"]    = true;
@@ -520,7 +552,7 @@ class UsermodBaseballAPI : public Usermod {
       filter["liveData"]["linescore"]["teams"]["home"]["runs"] = true;
 
       DynamicJsonDocument doc(BASEBALL_JSON_LIVE_DOC_SIZE);
-      DeserializationError err = deserializeJson(doc, stream, DeserializationOption::Filter(filter));
+      DeserializationError err = deserializeJson(doc, body, DeserializationOption::Filter(filter));
       if (err) {
         lastFetchError = err.c_str();
         DEBUG_PRINTF("BaseballAPI: live feed JSON parse failed: %s\n", err.c_str());
@@ -541,7 +573,6 @@ class UsermodBaseballAPI : public Usermod {
         if (overrideLightsOnGame) _restoreGameOverride();
         gameLive = false;
         liveGamePk = 0;
-        lastLiveDataUrl = "";
         DEBUG_PRINTLN(F("BaseballAPI: live feed reports game Final"));
         return;
       }
@@ -600,6 +631,14 @@ class UsermodBaseballAPI : public Usermod {
       }
 
       if (gameLive && liveGamePk > 0) {
+        uint32_t freeHeap = ESP.getFreeHeap();
+        if (freeHeap < BASEBALL_MIN_HEAP_LIVE_B) {
+          DEBUG_PRINTF("BaseballAPI: live fetch deferred, low heap (%u bytes free)\n", freeHeap);
+          lastFetchError = "Low heap (" + String(freeHeap) + " B)";
+          // Retry sooner than the normal live interval
+          lastFetch = millis() - intervalMs + BASEBALL_INTERVAL_HEAP_DEFER;
+          return;
+        }
         _fetchLiveFeed();
         if (gameLive) {
           lastFetch = millis();
@@ -608,11 +647,21 @@ class UsermodBaseballAPI : public Usermod {
         // game ended — fall through to refresh schedule for next game
       }
 
+      {
+        uint32_t freeHeap = ESP.getFreeHeap();
+        if (freeHeap < BASEBALL_MIN_HEAP_SCHEDULE_B) {
+          DEBUG_PRINTF("BaseballAPI: schedule fetch deferred, low heap (%u bytes free)\n", freeHeap);
+          lastFetchError = "Low heap (" + String(freeHeap) + " B)";
+          lastFetch = millis() - intervalMs + BASEBALL_INTERVAL_HEAP_DEFER;
+          return;
+        }
+      }
+
       _fetchSchedule();
       lastFetch = millis();
     }
 
-    void _parseMLB(Stream& stream) {
+    void _parseMLB(const String& body) {
       // Build a filter so only the fields we actually use are stored in the
       // parsed document. This dramatically reduces RAM usage on ESP8266 versus
       // parsing the full schedule payload. 512 bytes is enough for the filter tree.
@@ -627,7 +676,7 @@ class UsermodBaseballAPI : public Usermod {
       filter["dates"][0]["games"][0]["teams"]["away"]["team"]["name"] = true;
 
       DynamicJsonDocument doc(BASEBALL_JSON_SCHEDULE_DOC_SIZE);
-      DeserializationError err = deserializeJson(doc, stream, DeserializationOption::Filter(filter));
+      DeserializationError err = deserializeJson(doc, body, DeserializationOption::Filter(filter));
       if (err) {
         nextGameInfo = "JSON parse failed";
         lastFetchError = err.c_str();
@@ -656,7 +705,6 @@ class UsermodBaseballAPI : public Usermod {
       String upHome = "";
       String upDate = "";
       String upState = "";
-      String upLiveUrl = "";
       time_t upcomingUtcTime = 0;
       time_t nowUtc = _currentUtcApprox();
       bool clockValid = _hasValidClock();
@@ -721,7 +769,6 @@ class UsermodBaseballAPI : public Usermod {
               lastScore = away + " @ " + home + " (Live)";
             }
             liveGamePk = gamePk;
-            lastLiveDataUrl = _buildLiveDataUrl(gamePk);
             foundLive = true;
             break;
           }
@@ -731,7 +778,7 @@ class UsermodBaseballAPI : public Usermod {
             upHome = home;
             upDate = _formatApiUtcToLocal(gameDate);
             upState = state;
-            upLiveUrl = _buildLiveDataUrl(gamePk);
+            upcomingGamePk = gamePk;
             _parseApiUtc(gameDate, upcomingUtcTime);
             foundUpcoming = true;
           }
@@ -748,9 +795,7 @@ class UsermodBaseballAPI : public Usermod {
         gameLive = true;
         intervalMs = BASEBALL_INTERVAL_LIVE;
         lastFetchError = "";
-        if (lastLiveDataUrl.length() > 0) {
-          DEBUG_PRINTF("BaseballAPI: live data URL %s\n", lastLiveDataUrl.c_str());
-        }
+        DEBUG_PRINTF("BaseballAPI: live data URL %s\n", _buildLiveDataUrl(liveGamePk).c_str());
         return;
       }
 
@@ -775,12 +820,11 @@ class UsermodBaseballAPI : public Usermod {
 
       if (foundUpcoming) {
         nextGameInfo = upAway + " @ " + upHome + " " + upDate + " (" + upState + ")";
-        lastLiveDataUrl = upLiveUrl;
         intervalMs = (upcomingUtcTime > 0) ? _upcomingPollInterval(upcomingUtcTime) : 300000;
         lastFetchError = "";
       } else {
         nextGameInfo = "No upcoming game in window";
-        lastLiveDataUrl = "";
+        upcomingGamePk = 0;
         intervalMs = BASEBALL_INTERVAL_IDLE;
         lastFetchError = "No Preview/Scheduled game found";
         DEBUG_PRINTLN(F("BaseballAPI: no live game and no Preview/Scheduled game found in window"));
@@ -900,13 +944,17 @@ class UsermodBaseballAPI : public Usermod {
       
       JsonArray scoreArr = user.createNestedArray("MLB Game");
       int mlbId = _resolveMlbId();
-      String apiUrl = _buildScheduleUrl(mlbId);
       String statusLine = _buildStatusLine();
 
       scoreArr.add(statusLine);
       // scoreArr.add("Poll ms=" + String(intervalMs));
-      if (lastLiveDataUrl.length() > 0) {
-        scoreArr.add("LiveDataURL=" + lastLiveDataUrl);
+      // Build LiveDataURL on-demand (no persistent String member) to save ~250 B of heap.
+      // Show the live game URL when a game is live, or the upcoming game URL otherwise.
+      {
+        int displayPk = (gameLive && liveGamePk > 0) ? liveGamePk : upcomingGamePk;
+        if (displayPk > 0) {
+          scoreArr.add("LiveDataURL=" + _buildLiveDataUrl(displayPk));
+        }
       }
       if (teamPaletteIndex >= 0 && teamPaletteIndex < (int)customPalettes.size() && teamPaletteName.length() > 0) {
         scoreArr.add("Palette=" + teamPaletteName + " (id " + String(255 - teamPaletteIndex) + ")");
@@ -931,10 +979,12 @@ class UsermodBaseballAPI : public Usermod {
         String diag = "Diag: teamId=" + favoriteTeam;
         diag += " resolvedId=" + String(mlbId);
         diag += " url=";
-        if (lastRequestUrl.length() > 0) diag += lastRequestUrl;
-        else diag += (apiUrl.length() > 0) ? apiUrl : "(unresolved)";
+        // Build schedule URL only in this diagnostic branch to avoid repeated heap allocation
+        String apiUrl = _buildScheduleUrl(mlbId);
+        diag += (apiUrl.length() > 0) ? apiUrl : "(unresolved)";
         scoreArr.add(diag);
       }
+      scoreArr.add("Heap: " + String(ESP.getFreeHeap()) + " B free");
     }
 
     void addToConfig(JsonObject& root) override {
@@ -959,7 +1009,6 @@ class UsermodBaseballAPI : public Usermod {
         gameLive = false;
         lastScore = "No data";
         nextGameInfo = favoriteTeam.length() > 0 ? "Refreshing team schedule" : "Team not selected";
-        lastRequestUrl = "";
         lastFetchError = "";
         lastHttpCode = 0;
         lastFetch = millis() - intervalMs;
@@ -976,21 +1025,24 @@ class UsermodBaseballAPI : public Usermod {
     }
 
     void appendConfigData() override {
-      oappend(SET_F("addInfo('BaseballAPI:enabled',1,'');"));
-      oappend(SET_F("addInfo('BaseballAPI:team',1,'');"));
-      oappend(SET_F("addInfo('BaseballAPI:override',1,'');"));
-      oappend(SET_F("addInfo('BaseballAPI:palette',1,'');"));
-      oappend(SET_F("addInfo('BaseballAPI:status',1,'');"));
-      oappend(SET_F("var bpa=d.getElementsByName('BaseballAPI:palette');var bp=(bpa&&bpa.length>1)?bpa[1]:null;if(bp){bp.readOnly=true;var pc=bp.nextElementSibling;if(!pc||pc.className!=='bp-palette-colors'){pc=document.createElement('span');pc.className='bp-palette-colors';pc.style.marginLeft='8px';bp.insertAdjacentElement('afterend',pc);}var m=(bp.value||'').match(/#[0-9A-Fa-f]{6}/g)||[];pc.innerHTML='';for(var i=0;i<m.length;i++){var s=document.createElement('span');s.style.cssText='display:inline-block;width:12px;height:12px;margin:0 3px;border:1px solid #666;vertical-align:middle;background:'+m[i]+';';pc.appendChild(s);}}"));
-      oappend(SET_F("var bss=d.getElementsByName('BaseballAPI:status');var bs=(bss&&bss.length>1)?bss[1]:null;if(bs){bs.readOnly=true;var sd=bs.nextElementSibling;if(!sd||sd.className!=='bp-status-display'){sd=document.createElement('span');sd.className='bp-status-display';sd.style.marginLeft='8px';sd.style.display='inline-block';sd.style.verticalAlign='middle';bs.insertAdjacentElement('afterend',sd);}sd.innerHTML=(bs.value||'Unavailable');bs.style.display='none';}"));
-
-      oappend(SET_F("var dd=addDropdown('BaseballAPI','team');"));
-      oappend(SET_F("addOption(dd,'Select team','');"));
+      // Make palette field read-only and render inline color swatches.
+      // Compact IIFE avoids polluting the global scope; ~260 B vs the previous ~500 B block.
+      oappend(SET_F("(function(){var e=d.getElementsByName('BaseballAPI:palette'),p=e&&e[1];if(p){p.readOnly=true;var m=(p.value||'').match(/#[0-9A-Fa-f]{6}/g)||[],h='';m.forEach(function(c){h+='<span style=\"display:inline-block;width:12px;height:12px;margin:0 2px;background:'+c+'\"></span>';});p.insertAdjacentHTML('afterend',h);}})();"));
+      // Hide status input, show its value as readable text; ~130 B vs previous ~450 B block.
+      oappend(SET_F("(function(){var e=d.getElementsByName('BaseballAPI:status'),s=e&&e[1];if(s){s.insertAdjacentHTML('afterend','<span style=\"margin-left:8px\">'+s.value+'</span>');s.style.display='none';}})();"));
+      // Build team dropdown from a compact pipe-delimited string.
+      // "Name|id" pairs separated by commas: ~750 B total vs ~1300 B for the old
+      // array-of-arrays + retry function. The DOM is ready when s.js executes
+      // (settings_um.htm loads s.js only after building the DOM from /json/cfg),
+      // so addDropdown() always finds the input element on the first call — no retry needed.
+      // Stack buffer — no heap allocation; longest entry ≤ 25 chars + NUL, fits in 32 B.
+      oappend(SET_F("(function(){var t='Select team|"));
       for (uint8_t i = 0; i < 30; i++) {
-        const TeamMap& team = mlbMap[i];
-        String opt = "addOption(dd,'" + String(team.teamName) + "','" + String(team.mlbId) + "');";
-        oappend(opt.c_str());
+        char opt[32];
+        snprintf(opt, sizeof(opt), ",%s|%d", mlbMap[i].teamName, mlbMap[i].mlbId);
+        oappend(opt);
       }
+      oappend(SET_F("'.split(','),dd=addDropdown('BaseballAPI','team');if(dd)t.forEach(function(e){var p=e.indexOf('|');addOption(dd,e.slice(0,p),e.slice(p+1));});})();"));
     }
 
     uint16_t getId() override { return USERMOD_ID_BASEBALL_API; }

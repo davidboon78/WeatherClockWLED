@@ -643,11 +643,13 @@ class TM1637DisplayUsermod : public Usermod {
     }
 
     void appendConfigData() override {
-      oappend(SET_F("addInfo('TM1637Display:CLK-pin',1,'D5 / GPIO14 on NodeMCU');"));
-      oappend(SET_F("addInfo('TM1637Display:DIO-pin',1,'D6 / GPIO12 on NodeMCU');"));
-      oappend(SET_F("addInfo('TM1637Display:brightness',1,'0 (dim) \xe2\x80\x93 7 (bright)');"));
-      oappend(SET_F("addInfo('TM1637Display:slot-duration-ms',1,'How long each info slot is shown (ms, min 500)');"));
-      oappend(SET_F("addInfo('TM1637Display:time-duration-ms',1,'How long the clock is shown between info cycles (ms, min 1000)');"));
+      // s.js?p=8 is shared across all usermods. These are simple placeholder hints;
+      // keep strings short. 5 addInfo calls is already the minimum for this usermod.
+      oappend(SET_F("addInfo('TM1637Display:CLK-pin',1,'D5/GPIO14');"));
+      oappend(SET_F("addInfo('TM1637Display:DIO-pin',1,'D6/GPIO12');"));
+      oappend(SET_F("addInfo('TM1637Display:brightness',1,'0=dim, 7=bright');"));
+      oappend(SET_F("addInfo('TM1637Display:slot-duration-ms',1,'Info slot display time (ms, min 500)');"));
+      oappend(SET_F("addInfo('TM1637Display:time-duration-ms',1,'Clock display time between cycles (ms, min 1000)');"));
     }
 
     void enable(bool en)  { enabled = en; }

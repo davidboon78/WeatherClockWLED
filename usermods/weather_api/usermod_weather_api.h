@@ -53,6 +53,14 @@
   #define WEATHER_API_FILTER_DOC_SIZE 512
 #endif
 
+// Minimum free heap (bytes) required before issuing an HTTP fetch.
+// Peak usage during a fetch: filter doc (512 B) + HTTP client headers + body String
+// + response doc (256 B) ≈ ~3–4 KB. Guard at 6 KB to match baseball_api convention
+// and leave headroom for the async web server's TCP buffers.
+#ifndef WEATHER_API_MIN_HEAP_B
+  #define WEATHER_API_MIN_HEAP_B 6000
+#endif
+
 // ArduinoJSON response document capacity — holds only the filtered fields.
 #ifndef WEATHER_API_RESPONSE_DOC_SIZE
   #define WEATHER_API_RESPONSE_DOC_SIZE 256
@@ -60,7 +68,7 @@
 
 // Default fetch interval in milliseconds.
 #ifndef WEATHER_API_FETCH_INTERVAL_MS
-  #define WEATHER_API_FETCH_INTERVAL_MS (60UL * 1000UL)
+  #define WEATHER_API_FETCH_INTERVAL_MS (600UL * 1000UL)
 #endif
 
 // Callback type. The JsonVariant is valid only during the callback; copy values out immediately.

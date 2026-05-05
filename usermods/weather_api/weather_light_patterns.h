@@ -30,6 +30,15 @@ inline static void _applyPattern(uint8_t fxMode, uint32_t color0,
                            uint8_t  inten  = 128,
                            uint8_t  pal    = 0)
 {
+  // Segment::setMode() creates a transition copy of the old segment.
+  // On ESP8266 this requires a pixel buffer allocation (~LED_count * 3 B + overhead).
+  // When the heap is exhausted, the allocation fails and setMode() leaves the
+  // old-segment pointer NULL; the subsequent chained .setPalette() call then
+  // dereferences that NULL at offset 0x1c and crashes (LoadProhibited exception 28).
+  // Guard at 4 KB — enough for a 30-LED transition buffer (~90 B) plus all
+  // supporting allocations and the async-web-server's TCP send buffer.
+  if (ESP.getFreeHeap() < 4000U) return;
+
   Segment& seg = strip.getMainSegment();
   seg.setMode(fxMode)
      .setPalette(pal)

@@ -632,8 +632,11 @@ static_assert(WLED_MAX_BUSSES <= 32, "WLED_MAX_BUSSES exceeds hard limit");
 
 // Web server limits
 #ifdef ESP8266
-// Minimum heap to consider handling a request
-#define WLED_REQUEST_MIN_HEAP (8*1024)
+// Minimum heap to consider handling a request.
+// Custom builds with heavy usermods (weather, baseball, display) settle at ~7 KB free heap,
+// so (8*1024) would reject all new connections. (6*1024) matches WLED_REQUEST_HEAP_USAGE
+// which is the per-request estimate: accept a connection when there is enough heap for one request.
+#define WLED_REQUEST_MIN_HEAP (6*1024)
 // Estimated maximum heap required by any one request
 #define WLED_REQUEST_HEAP_USAGE (6*1024)
 #else

@@ -429,36 +429,20 @@ class TM1637ClockUsermod : public Usermod {
     }
 
     void appendConfigData() override {
-      // Weather override hint
-      oappend(SET_F("addInfo('TM1637Clock:enabled',1,'Enable weather-driven LED control');"));
-      // Keep settings UI script minimal to improve reliability on constrained devices.
+      // s.js?p=8 is a single shared response for all usermods — keep output minimal.
+      // Wrap in an IIFE to avoid leaking 'dd'/'mo' into the global JS scope.
+      oappend(SET_F("(function(){"));
+      oappend(SET_F("addInfo('TM1637Clock:enabled',1,'Weather-driven LED control');"));
+      // Override-type: only 3 options — direct addOption calls are shorter than a forEach loop.
       oappend(SET_F("var dd=addDropdown('TM1637Clock','override-type');"));
-      oappend(SET_F("addOption(dd,'No override',0);"));
-      oappend(SET_F("addOption(dd,'Light pattern',1);"));
-      oappend(SET_F("addOption(dd,'Color palette',2);"));
-      oappend(SET_F("dd=addDropdown('TM1637Clock','light-mode');"));
-      oappend(SET_F("addOption(dd,'Condition only',0);"));
-      oappend(SET_F("addOption(dd,'Temperature only',1);"));
-      oappend(SET_F("addOption(dd,'Time of day only',2);"));
-      oappend(SET_F("addOption(dd,'Condition + Temperature',3);"));
-      oappend(SET_F("addOption(dd,'Condition + Time of day',4);"));
-      oappend(SET_F("addOption(dd,'Temperature + Time of day',5);"));
-      oappend(SET_F("addOption(dd,'All (Condition + Temp + Time)',6);"));
-      oappend(SET_F("addInfo('TM1637Clock:preset-clear',1,'WLED preset # for Clear/Sunny (0=off)');"));
-      oappend(SET_F("addInfo('TM1637Clock:preset-cloudy',1,'WLED preset # for Cloudy/Overcast (0=off)');"));
-      oappend(SET_F("addInfo('TM1637Clock:preset-fog',1,'WLED preset # for Fog/Mist (0=off)');"));
-      oappend(SET_F("addInfo('TM1637Clock:preset-thunder',1,'WLED preset # for Thunder/Storm (0=off)');"));
-      oappend(SET_F("addInfo('TM1637Clock:preset-snow',1,'WLED preset # for Snow/Ice (0=off)');"));
-      oappend(SET_F("addInfo('TM1637Clock:preset-rain',1,'WLED preset # for Rain/Drizzle (0=off)');"));
-      oappend(SET_F("dd=addDropdown('TM1637Clock','palette-mode');"));
-      oappend(SET_F("addOption(dd,'Condition only',0);"));
-      oappend(SET_F("addOption(dd,'Temperature only',1);"));
-      oappend(SET_F("addOption(dd,'Time of day only',2);"));
-      oappend(SET_F("addOption(dd,'Condition + Temperature',3);"));
-      oappend(SET_F("addOption(dd,'Condition + Time of day',4);"));
-      oappend(SET_F("addOption(dd,'Temperature + Time of day',5);"));
-      oappend(SET_F("addOption(dd,'All (Condition + Temp + Time)',6);"));
-     
+      oappend(SET_F("addOption(dd,'No override',0);addOption(dd,'Light pattern',1);addOption(dd,'Color palette',2);"));
+      // light-mode and palette-mode share the same 7 options; build once, apply to both.
+      // Using a pipe-delimited string + forEach saves ~320 B vs 14 separate addOption calls.
+      oappend(SET_F("var mo='Condition only|0,Temperature only|1,Time of day only|2,Condition + Temperature|3,Condition + Time of day|4,Temperature + Time of day|5,All (Cond+Temp+Time)|6'.split(',');"));
+      oappend(SET_F("['light-mode','palette-mode'].forEach(function(f){dd=addDropdown('TM1637Clock',f);mo.forEach(function(s){var p=s.indexOf('|');addOption(dd,s.slice(0,p),+s.slice(p+1));});});"));
+      // Six preset addInfo hints via a single template loop — saves ~210 B vs 6 separate calls.
+      oappend(SET_F("'clear|Clear/Sunny,cloudy|Cloudy/Overcast,fog|Fog/Mist,thunder|Thunder/Storm,snow|Snow/Ice,rain|Rain/Drizzle'.split(',').forEach(function(s){var p=s.indexOf('|');addInfo('TM1637Clock:preset-'+s.slice(0,p),1,'Preset # '+s.slice(p+1)+' (0=off)');});"));
+      oappend(SET_F("})();"));
     }
 
     void applyWeatherLightPattern(bool ignoreBaseballOverride = false) {
