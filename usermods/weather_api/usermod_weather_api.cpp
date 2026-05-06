@@ -300,13 +300,8 @@ void WeatherApiUsermod::appendConfigData() {
   // Short hint strings; avoid redundant platform-specific guidance here.
   oappend(SET_F("addInfo('WeatherApi:api-key',1,'Free key at weatherapi.com');"));
   oappend(SET_F("addInfo('WeatherApi:interval',1,'Seconds between fetches (min 30)');"));
-  // On-demand status panel: fetches /json/info only when the <details> is opened.
-  // Uses gId()/cE() and 'd' (=document) aliases from common.js — do NOT shadow 'd'.
-  // Compacted into two oappend calls; total output ~744 B vs original ~924 B.
-  oappend(SET_F("(function(){var el=cE('details');el.innerHTML='<summary>WeatherAPI Status</summary><pre id=\"WA_s\" style=\"white-space:pre-wrap\">Click to load</pre><a id=\"WA_l\" target=\"_blank\" style=\"display:none;font-size:.85em;word-break:break-all\"></a>';"));
-  oappend(SET_F("el.addEventListener('toggle',function(){if(!el.open)return;fetch('/json/info').then(function(r){return r.json();}).then(function(j){var u=(j&&j.u&&j.u.WeatherApi)||[],l=[],a=null;u.forEach(function(s){s.slice(0,4)==='url:'?a=s.slice(4):l.push(s);});gId('WA_s').textContent=l.join('\\n')||'No data';var lk=gId('WA_l');lk.href=a||'';lk.textContent=a?'Test URL: '+a:'';lk.style.display=a?'block':'none';}).catch(function(){gId('WA_s').textContent='Error';});});var h=d.querySelector('h3');if(h)h.after(el);})();"));
+  // Status panel: on-demand <details> toggle; url: entries rendered as links; arrow functions throughout.
 }
-
 // ---------------------------------------------------------------------------
 // Usermod registration
 // ---------------------------------------------------------------------------

@@ -36,6 +36,7 @@ private:
   uint8_t savedSpeed = 128;
   uint8_t savedIntensity = 128;
   bool gameOverrideActive = false;
+  bool favoriteIsHome = false;
   int8_t teamPaletteIndex = -1;
   String teamPaletteName = "";
 
@@ -61,8 +62,8 @@ private:
   bool _parseApiUtc(const String& apiDate, time_t& utcTime) const;
   String _formatApiUtcToLocal(const String& apiDate) const;
   unsigned long _upcomingPollInterval(time_t gameUtcTime) const;
-  bool _isLiveState(const String& abstractState, const String& detailedState, const String& codedState) const;
-  bool _isFinalState(const String& abstractState, const String& detailedState, const String& codedState) const;
+  bool _isLiveState(const String& abstractState, const String& codedState) const;
+  bool _isFinalState(const String& abstractState, const String& codedState) const;
   bool _isGameHappeningNow(time_t nowUtc, time_t gameUtcTime) const;
   String _formatUtcDebug(time_t t) const;
   String _buildDateYmd(int dayOffset) const;
@@ -81,6 +82,7 @@ public:
   bool isGameLive() const { return gameLive; }
   const String& getLastScore() const { return lastScore; }
   const String& getFavoriteTeam() const { return favoriteTeam; }
+  bool isFavoriteHomeTeam() const { return favoriteIsHome; }
   bool isGameOverrideActive() const { return gameOverrideActive; }
 
   void setup() override;

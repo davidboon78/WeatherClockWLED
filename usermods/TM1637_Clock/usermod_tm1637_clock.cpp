@@ -95,10 +95,15 @@ class TM1637ClockUsermod : public Usermod {
       String fav, opp;
       int favScore = 0, oppScore = 0;
       char buf[5];
-      if (_instance->parseBaseballScore(lastScore, _instance->baseballApi->getFavoriteTeam(),
-                                         fav, favScore, opp, oppScore)) {
+      // Parse with empty favTeam so the fallback always runs: fav=away, opp=home.
+      // Then swap if the favorite is actually the home team.
+      if (_instance->parseBaseballScore(lastScore, "", fav, favScore, opp, oppScore)) {
+        if (_instance->baseballApi->isFavoriteHomeTeam()) {
+          int tmp = favScore; favScore = oppScore; oppScore = tmp;
+        }
         _buildScoreText(favScore, oppScore, buf);
-        DEBUG_PRINTF("TM1637 Clock: MLB slot provider pushing score '%s'\n", buf);
+        DEBUG_PRINTF("TM1637 Clock: MLB slot provider pushing score '%s' (homeGame=%d)\n",
+                     buf, _instance->baseballApi->isFavoriteHomeTeam());
       } else {
         // Parse failure — show unambiguous error marker
         strncpy(buf, "----", sizeof(buf));
@@ -444,11 +449,10 @@ class TM1637ClockUsermod : public Usermod {
       oappend(SET_F("var dd=addDropdown('TM1637Clock','override-type');"));
       oappend(SET_F("addOption(dd,'No override',0);addOption(dd,'Light pattern',1);addOption(dd,'Color palette',2);"));
       // light-mode and palette-mode share the same 7 options; build once, apply to both.
-      // Using a pipe-delimited string + forEach saves ~320 B vs 14 separate addOption calls.
-      oappend(SET_F("var mo='Condition only|0,Temperature only|1,Time of day only|2,Condition + Temperature|3,Condition + Time of day|4,Temperature + Time of day|5,All (Cond+Temp+Time)|6'.split(',');"));
-      oappend(SET_F("['light-mode','palette-mode'].forEach(function(f){dd=addDropdown('TM1637Clock',f);mo.forEach(function(s){var p=s.indexOf('|');addOption(dd,s.slice(0,p),+s.slice(p+1));});});"));
-      // Six preset addInfo hints via a single template loop — saves ~210 B vs 6 separate calls.
-      oappend(SET_F("'clear|Clear/Sunny,cloudy|Cloudy/Overcast,fog|Fog/Mist,thunder|Thunder/Storm,snow|Snow/Ice,rain|Rain/Drizzle'.split(',').forEach(function(s){var p=s.indexOf('|');addInfo('TM1637Clock:preset-'+s.slice(0,p),1,'Preset # '+s.slice(p+1)+' (0=off)');});"));
+      oappend(SET_F("var mo='Condition|0,Temperature|1,Time of day|2,Cond+Temp|3,Cond+Time|4,Temp+Time|5,All|6'.split(',');"));
+      oappend(SET_F("['light-mode','palette-mode'].forEach(f=>{dd=addDropdown('TM1637Clock',f);mo.forEach(s=>{var p=s.indexOf('|');addOption(dd,s.slice(0,p),+s.slice(p+1));});});"));
+      // Six preset hints — category label used directly as hint text.
+      oappend(SET_F("'clear|Clear/Sunny,cloudy|Cloudy/Overcast,fog|Fog/Mist,thunder|Thunder/Storm,snow|Snow/Ice,rain|Rain/Drizzle'.split(',').forEach(s=>{var p=s.indexOf('|');addInfo('TM1637Clock:preset-'+s.slice(0,p),1,s.slice(p+1)+' (0=off)');});"));
       oappend(SET_F("})();"));
     }
 

@@ -1,4 +1,4 @@
-#include "wled.h"
+﻿#include "wled.h"
 
 #ifdef USERMOD_BASEBALL_API
 
@@ -96,6 +96,9 @@ class UsermodBaseballAPI : public Usermod {
     // Save/Restore light state
     uint8_t savedMode = 0, savedPalette = 0, savedSpeed = 128, savedIntensity = 128;
     bool gameOverrideActive = false;
+    // True when the favorite team is the home team in the current live game.
+    // Set at parse time so callers can correctly order fav vs opp scores.
+    bool favoriteIsHome = false;
     int8_t teamPaletteIndex = -1;
     String teamPaletteName = "";
 
@@ -575,6 +578,10 @@ class UsermodBaseballAPI : public Usermod {
       int    aScore        = doc["liveData"]["linescore"]["teams"]["away"]["runs"] | -1;
       int    hScore        = doc["liveData"]["linescore"]["teams"]["home"]["runs"] | -1;
 
+      // Determine home/away for the favorite team while we have the names.
+      const char* favName = _resolveTeamName(_resolveMlbId());
+      favoriteIsHome = favName && home.equalsIgnoreCase(String(favName));
+
       if (_isFinalState(abstractState, codedState)) {
         if (aScore >= 0 && hScore >= 0) {
           lastScore = away + " " + String(aScore) + " @ " + home + " " + String(hScore) + " (Final)";
@@ -582,6 +589,7 @@ class UsermodBaseballAPI : public Usermod {
         if (overrideLightsOnGame) _restoreGameOverride();
         gameLive = false;
         liveGamePk = 0;
+        favoriteIsHome = false;
         DEBUG_PRINTLN(F("BaseballAPI: live feed reports game Final"));
         return;
       }
@@ -777,6 +785,8 @@ class UsermodBaseballAPI : public Usermod {
             } else {
               lastScore = away + " @ " + home + " (Live)";
             }
+            const char* favNameSched = _resolveTeamName(_resolveMlbId());
+            favoriteIsHome = favNameSched && home.equalsIgnoreCase(String(favNameSched));
             liveGamePk = gamePk;
             foundLive = true;
             break;
@@ -826,6 +836,7 @@ class UsermodBaseballAPI : public Usermod {
       if (wasLive && overrideLightsOnGame) _restoreGameOverride();
       gameLive = false;
       liveGamePk = 0;
+      favoriteIsHome = false;
 
       if (foundUpcoming) {
         nextGameInfo = upAway + " @ " + upHome + " " + upDate + " (" + upState + ")";
@@ -888,6 +899,7 @@ class UsermodBaseballAPI : public Usermod {
     bool isGameLive() const { return gameLive; }
     const String& getLastScore() const { return lastScore; }
     const String& getFavoriteTeam() const { return favoriteTeam; }
+    bool isFavoriteHomeTeam() const { return favoriteIsHome; }
     bool isGameOverrideActive() const { return gameOverrideActive; }
 
     void setup() override {
@@ -1034,24 +1046,11 @@ class UsermodBaseballAPI : public Usermod {
     }
 
     void appendConfigData() override {
-      // Make palette field read-only and render inline color swatches.
-      // Compact IIFE avoids polluting the global scope; ~260 B vs the previous ~500 B block.
-      oappend(SET_F("(function(){var e=d.getElementsByName('BaseballAPI:palette'),p=e&&e[1];if(p){p.readOnly=true;var m=(p.value||'').match(/#[0-9A-Fa-f]{6}/g)||[],h='';m.forEach(function(c){h+='<span style=\"display:inline-block;width:12px;height:12px;margin:0 2px;background:'+c+'\"></span>';});p.insertAdjacentHTML('afterend',h);}})();"));
-      // Hide status input, show its value as readable text; ~130 B vs previous ~450 B block.
-      oappend(SET_F("(function(){var e=d.getElementsByName('BaseballAPI:status'),s=e&&e[1];if(s){s.insertAdjacentHTML('afterend','<span style=\"margin-left:8px\">'+s.value+'</span>');s.style.display='none';}})();"));
-      // Build team dropdown from a compact pipe-delimited string.
-      // "Name|id" pairs separated by commas: ~750 B total vs ~1300 B for the old
-      // array-of-arrays + retry function. The DOM is ready when s.js executes
-      // (settings_um.htm loads s.js only after building the DOM from /json/cfg),
-      // so addDropdown() always finds the input element on the first call — no retry needed.
-      // Stack buffer — no heap allocation; longest entry ≤ 25 chars + NUL, fits in 32 B.
-      oappend(SET_F("(function(){var t='Select team|"));
-      for (uint8_t i = 0; i < 30; i++) {
-        char opt[32];
-        snprintf(opt, sizeof(opt), ",%s|%d", mlbMap[i].teamName, mlbMap[i].mlbId);
-        oappend(opt);
-      }
-      oappend(SET_F("'.split(','),dd=addDropdown('BaseballAPI ','team');if(dd)t.forEach(function(e){var p=e.indexOf('|');addOption(dd,e.slice(0,p),e.slice(p+1));});})();"));
+      // Merged IIFE: render palette color swatches and hide status input in one pass.
+      oappend(SET_F("(function(){var e=d.getElementsByName('BaseballAPI:palette'),p=e&&e[1];if(p){p.readOnly=true;var m=(p.value||'').match(/#[0-9A-Fa-f]{6}/g)||[],h='';m.forEach(c=>h+='<span style=\"display:inline-block;width:12px;height:12px;margin:0 2px;background:'+c+'\"></span>');p.insertAdjacentHTML('afterend',h);}e=d.getElementsByName('BaseballAPI:status');var s=e&&e[1];if(s){s.insertAdjacentHTML('afterend','<span style=\"margin-left:8px\">'+s.value+'</span>');s.style.display='none';}})();"));
+      // Hardcoded pipe-delimited team list — no loop, no snprintf, no stack buffer.
+      // Update this string if mlbMap entries change.
+      oappend(SET_F("(function(){var t='Select team|,Arizona Diamondbacks|109,Athletics|133,Atlanta Braves|144,Baltimore Orioles|110,Boston Red Sox|111,Chicago Cubs|112,Chicago White Sox|145,Cincinnati Reds|113,Cleveland Guardians|114,Colorado Rockies|115,Detroit Tigers|116,Houston Astros|117,Kansas City Royals|118,Los Angeles Angels|108,Los Angeles Dodgers|119,Miami Marlins|146,Milwaukee Brewers|158,Minnesota Twins|142,New York Mets|121,New York Yankees|147,Philadelphia Phillies|143,Pittsburgh Pirates|134,San Diego Padres|135,San Francisco Giants|137,Seattle Mariners|136,St. Louis Cardinals|138,Tampa Bay Rays|139,Texas Rangers|140,Toronto Blue Jays|141,Washington Nationals|120'.split(','),dd=addDropdown('BaseballAPI','team');if(dd)t.forEach(e=>{var p=e.indexOf('|');addOption(dd,e.slice(0,p),e.slice(p+1));});})();"));
     }
 
     uint16_t getId() override { return USERMOD_ID_BASEBALL_API; }
