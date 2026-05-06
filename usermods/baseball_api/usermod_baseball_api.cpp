@@ -181,6 +181,15 @@ class UsermodBaseballAPI : public Usermod {
         return;
       }
 
+      // WS2812B color filter: apply inverse-gamma pre-correction so that WLED's
+      // per-pixel gamma pass during rendering produces the intended perceptual
+      // color on WS2812B LEDs.  Team brand colors are defined in display/perceptual
+      // space; without this, WLED's gamma darkens them relative to their intended
+      // appearance.  gamma32inv() is a no-op when gammaCorrectCol is false.
+      for (uint8_t i = 0; i < colorCount; i++) {
+        effectiveColors[i] = gamma32inv(effectiveColors[i]);
+      }
+
       if (colorCount == 1) {
         uint32_t color = effectiveColors[0];
         palette = CRGBPalette16(CRGB((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF));
@@ -1042,7 +1051,7 @@ class UsermodBaseballAPI : public Usermod {
         snprintf(opt, sizeof(opt), ",%s|%d", mlbMap[i].teamName, mlbMap[i].mlbId);
         oappend(opt);
       }
-      oappend(SET_F("'.split(','),dd=addDropdown('BaseballAPI','team');if(dd)t.forEach(function(e){var p=e.indexOf('|');addOption(dd,e.slice(0,p),e.slice(p+1));});})();"));
+      oappend(SET_F("'.split(','),dd=addDropdown('BaseballAPI ','team');if(dd)t.forEach(function(e){var p=e.indexOf('|');addOption(dd,e.slice(0,p),e.slice(p+1));});})();"));
     }
 
     uint16_t getId() override { return USERMOD_ID_BASEBALL_API; }

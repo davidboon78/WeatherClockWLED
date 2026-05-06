@@ -156,8 +156,15 @@ class TM1637ClockUsermod : public Usermod {
 
       String away = awayPart.substring(0, awaySplit);
       int awayScore = awayPart.substring(awaySplit + 1).toInt();
-      String home = homePart.substring(0, homeSplit);
-      int homeScore = homePart.substring(homeSplit + 1).toInt();
+      // Strip trailing " (inning info)" or " (Final)" from homePart before
+      // parsing the score. Without this, lastIndexOf(' ') lands on the space
+      // before "out" / "outs" / "Final", making homeScore always 0.
+      int parenIdx = homePart.indexOf(" (");
+      String homePartClean = (parenIdx >= 0) ? homePart.substring(0, parenIdx) : homePart;
+      homeSplit = homePartClean.lastIndexOf(' ');
+      if (homeSplit <= 0) return false;
+      String home = homePartClean.substring(0, homeSplit);
+      int homeScore = homePartClean.substring(homeSplit + 1).toInt();
 
       if (home.equalsIgnoreCase(favTeam)) {
         fav = home; favScore = homeScore; opp = away; oppScore = awayScore;
@@ -192,8 +199,7 @@ class TM1637ClockUsermod : public Usermod {
       DEBUG_PRINTF("TM1637 Clock: weather condition_code=%d\n", _instance->weatherCondCode);
       if (_instance->weatherOverrideType > 0) {
   #ifdef USERMOD_BASEBALL_API
-          if (_instance->baseballApi && _instance->baseballApi->isGameLive() &&
-              _instance->baseballApi->isGameOverrideActive()) return;
+          if (_instance->baseballApi && _instance->baseballApi->isGameLive()) return;
   #endif
         _instance->applyWeatherLightPattern();
         _instance->lastPatternApply = millis();
@@ -233,7 +239,6 @@ class TM1637ClockUsermod : public Usermod {
     }
 
     void loop() override {
-      static unsigned long lastGateLogMs = 0;
       unsigned long nowMs = millis();
 
       if (!enabled) return;
@@ -249,11 +254,13 @@ class TM1637ClockUsermod : public Usermod {
       // registered in setup(), so no timing state is needed here.
       if (timeValid && weatherFetched && weatherOverrideType > 0 &&
           (nowMs - lastPatternApply > TM1637_PATTERN_APPLY_INTERVAL_MS)) {
+        // Always reset the timer so we don't fire every loop tick while
+        // baseball is active. The gate below will skip the actual apply.
+        lastPatternApply = nowMs;
       #ifdef USERMOD_BASEBALL_API
-        if (!baseballApi || !baseballApi->isGameLive() || !baseballApi->isGameOverrideActive()) {
+        if (!baseballApi || !baseballApi->isGameLive()) {
       #endif
         applyWeatherLightPattern();
-        lastPatternApply = nowMs;
       #ifdef USERMOD_BASEBALL_API
         }
       #endif
@@ -449,9 +456,8 @@ class TM1637ClockUsermod : public Usermod {
       int h = hour(localTime);
 
       #ifdef USERMOD_BASEBALL_API
-        // Baseball game override takes priority — do not apply weather patterns while active
-        if (!ignoreBaseballOverride && baseballApi && baseballApi->isGameLive() &&
-            baseballApi->isGameOverrideActive()) return;
+        // Baseball game override takes priority — do not apply weather patterns while a game is live
+        if (!ignoreBaseballOverride && baseballApi && baseballApi->isGameLive()) return;
       #endif
 
       if (weatherOverrideType == 1) {
