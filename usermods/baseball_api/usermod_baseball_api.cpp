@@ -425,7 +425,38 @@ class UsermodBaseballAPI : public Usermod {
     }
 
     String _buildStatusValue() const {
-      if (gameLive && lastScore.length() > 0) return lastScore;
+      if (gameLive && lastScore.length() > 0) {
+        // Compute what the TM1637 display will show: parse away/home scores then
+        // swap if favorite is the home team (same logic as _baseballSlotProvider).
+        String diag = lastScore;
+        int atPos = lastScore.indexOf(" @ ");
+        if (atPos > 0) {
+          String awayPart = lastScore.substring(0, atPos);
+          int awayNum = awayPart.substring(awayPart.lastIndexOf(' ') + 1).toInt();
+          String homePart = lastScore.substring(atPos + 3);
+          int parenPos = homePart.indexOf(" (");
+          if (parenPos > 0) homePart = homePart.substring(0, parenPos);
+          int homeNum = homePart.substring(homePart.lastIndexOf(' ') + 1).toInt();
+          int favNum = favoriteIsHome ? homeNum : awayNum;
+          int oppNum = favoriteIsHome ? awayNum : homeNum;
+          
+          // Extract home team name from lastScore for debug
+          String homeTeamName = lastScore.substring(atPos + 3);
+          int nameEnd = homeTeamName.indexOf(" ");
+          if (nameEnd > 0) homeTeamName = homeTeamName.substring(0, nameEnd);
+          
+          // Get configured favorite team name
+          const char* favName = _resolveTeamName(_resolveMlbId());
+          String configFavName = favName ? String(favName) : "unknown";
+          
+          char buf[128];
+          snprintf(buf, sizeof(buf), " | Display:%d-%d homeTeam=%s | API_home:'%s' Config_fav:'%s' match=%d",
+                   favNum, oppNum, favoriteIsHome ? "Y" : "N",
+                   homeTeamName.c_str(), configFavName.c_str(), (int)favoriteIsHome);
+          diag += buf;
+        }
+        return diag;
+      }
       if (nextGameInfo.length() > 0 && nextGameInfo != "Waiting for first fetch" && nextGameInfo != "Refreshing team schedule") {
         int openParen = nextGameInfo.lastIndexOf('(');
         int atPos = nextGameInfo.indexOf(" @ ");
@@ -578,9 +609,26 @@ class UsermodBaseballAPI : public Usermod {
       int    aScore        = doc["liveData"]["linescore"]["teams"]["away"]["runs"] | -1;
       int    hScore        = doc["liveData"]["linescore"]["teams"]["home"]["runs"] | -1;
 
+      // Trim whitespace from team names to handle API variations
+      away.trim();
+      home.trim();
+
       // Determine home/away for the favorite team while we have the names.
       const char* favName = _resolveTeamName(_resolveMlbId());
       favoriteIsHome = favName && home.equalsIgnoreCase(String(favName));
+      
+      // Detailed comparison logging with lengths
+      if (favName) {
+        int homeLen = home.length();
+        int favLen = strlen(favName);
+        bool match = home.equalsIgnoreCase(String(favName));
+        DEBUG_PRINTF("BaseballAPI: _parseLiveFeed comparison:\n");
+        DEBUG_PRINTF("  API home: '%s' (len=%d)\n", home.c_str(), homeLen);
+        DEBUG_PRINTF("  Config:   '%s' (len=%d)\n", favName, favLen);
+        DEBUG_PRINTF("  Match result: %d  favoriteIsHome=%d\n", (int)match, (int)favoriteIsHome);
+      } else {
+        DEBUG_PRINTF("BaseballAPI: _parseLiveFeed favName is NULL, home='%s'\n", home.c_str());
+      }
 
       if (_isFinalState(abstractState, codedState)) {
         if (aScore >= 0 && hScore >= 0) {
@@ -899,6 +947,7 @@ class UsermodBaseballAPI : public Usermod {
     bool isGameLive() const { return gameLive; }
     const String& getLastScore() const { return lastScore; }
     const String& getFavoriteTeam() const { return favoriteTeam; }
+    String getFavoriteTeamResolvedName() const;
     bool isFavoriteHomeTeam() const { return favoriteIsHome; }
     bool isGameOverrideActive() const { return gameOverrideActive; }
 
@@ -968,6 +1017,26 @@ class UsermodBaseballAPI : public Usermod {
       String statusLine = _buildStatusLine();
 
       scoreArr.add(statusLine);
+      // Show what the TM1637 display slot will render: parse away/home scores from lastScore
+      // the same way _baseballSlotProvider does (empty favTeam → fallback gives away-first),
+      // then swap if favoriteIsHome. This lets the config page confirm the display output.
+      if (gameLive && liveGamePk > 0 && lastScore.length() > 0) {
+        int atPos = lastScore.indexOf(" @ ");
+        if (atPos > 0) {
+          String awayPart = lastScore.substring(0, atPos);
+          int awayNum = awayPart.substring(awayPart.lastIndexOf(' ') + 1).toInt();
+          String homePart = lastScore.substring(atPos + 3);
+          int parenPos = homePart.indexOf(" (");
+          if (parenPos > 0) homePart = homePart.substring(0, parenPos);
+          int homeNum = homePart.substring(homePart.lastIndexOf(' ') + 1).toInt();
+          int favNum = favoriteIsHome ? homeNum : awayNum;
+          int oppNum = favoriteIsHome ? awayNum : homeNum;
+          char dispBuf[48];
+          snprintf(dispBuf, sizeof(dispBuf), "Display: %d-%d (homeTeam=%s)",
+                   favNum % 10, oppNum % 10, favoriteIsHome ? "true" : "false");
+          scoreArr.add(dispBuf);
+        }
+      }
       // scoreArr.add("Poll ms=" + String(intervalMs));
       // Build LiveDataURL on-demand (no persistent String member) to save ~250 B of heap.
       // Show the live game URL when a game is live, or the upcoming game URL otherwise.
@@ -1096,6 +1165,11 @@ const UsermodBaseballAPI::TeamMap UsermodBaseballAPI::mlbMap[] = {
   {"Toronto Blue Jays", 141, 4, {0x134A8E, 0x1D2D5C, 0xE8291C, 0xFFFFFF, 0x000000}},
   {"Washington Nationals", 120, 3, {0xAB0003, 0x14225A, 0xFFFFFF, 0x000000, 0x000000}}
 };
+
+String UsermodBaseballAPI::getFavoriteTeamResolvedName() const {
+  const TeamMap* team = _resolveTeamMap(favoriteTeam.toInt());
+  return team ? String(team->teamName) : String();
+}
 
 static UsermodBaseballAPI baseball_api;
 REGISTER_USERMOD(baseball_api);

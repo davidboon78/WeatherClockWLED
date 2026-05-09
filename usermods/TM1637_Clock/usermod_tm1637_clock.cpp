@@ -76,9 +76,43 @@ class TM1637ClockUsermod : public Usermod {
     // Build a 4-char score text (D-D) from parsed scores.
     // Returns the text in outBuf[5].
     static void _buildScoreText(int favScore, int oppScore, char outBuf[5]) {
-      uint8_t favDigit = (uint8_t)(((favScore < 0) ? 0 : favScore) % 10);
-      uint8_t oppDigit = (uint8_t)(((oppScore < 0) ? 0 : oppScore) % 10);
-      snprintf(outBuf, 5, "%u-%u", favDigit, oppDigit);
+      int fav = (favScore < 0) ? 0 : favScore;
+      int opp = (oppScore < 0) ? 0 : oppScore;
+
+      // TM1637 has exactly 4 character positions.
+      // Prefer full values when they fit:
+      //  - d-d, dd-d, d-dd fit exactly.
+      //  - dd-dd (or wider) does not fit, so show last digits.
+      if (fav < 10 && opp < 10) {
+        outBuf[0] = '0' + fav;
+        outBuf[1] = '-';
+        outBuf[2] = '0' + opp;
+        outBuf[3] = '\0';
+        return;
+      }
+
+      if (fav < 100 && opp < 10) {
+        outBuf[0] = '0' + (fav / 10);
+        outBuf[1] = '0' + (fav % 10);
+        outBuf[2] = '-';
+        outBuf[3] = '0' + opp;
+        outBuf[4] = '\0';
+        return;
+      }
+
+      if (fav < 10 && opp < 100) {
+        outBuf[0] = '0' + fav;
+        outBuf[1] = '-';
+        outBuf[2] = '0' + (opp / 10);
+        outBuf[3] = '0' + (opp % 10);
+        outBuf[4] = '\0';
+        return;
+      }
+
+      outBuf[0] = '0' + (fav % 10);
+      outBuf[1] = '-';
+      outBuf[2] = '0' + (opp % 10);
+      outBuf[3] = '\0';
     }
 
     // Slot provider callback — called by TM1637Display once per cycle rebuild.
@@ -91,23 +125,27 @@ class TM1637ClockUsermod : public Usermod {
 
       const String& lastScore = _instance->baseballApi->getLastScore();
       if (lastScore.length() == 0) return;
+      String favTeamName = _instance->baseballApi->getFavoriteTeamResolvedName();
+
+      DEBUG_PRINTF("TM1637 Clock: MLB slot provider - raw lastScore='%s'\n", lastScore.c_str());
+      DEBUG_PRINTF("TM1637 Clock: MLB slot provider - resolved favorite='%s'\n", favTeamName.c_str());
 
       String fav, opp;
       int favScore = 0, oppScore = 0;
       char buf[5];
-      // Parse with empty favTeam so the fallback always runs: fav=away, opp=home.
-      // Then swap if the favorite is actually the home team.
-      if (_instance->parseBaseballScore(lastScore, "", fav, favScore, opp, oppScore)) {
-        if (_instance->baseballApi->isFavoriteHomeTeam()) {
-          int tmp = favScore; favScore = oppScore; oppScore = tmp;
-        }
+      // Parse directly in favorite-vs-opponent order using resolved team name.
+      if (_instance->parseBaseballScore(lastScore, favTeamName, fav, favScore, opp, oppScore)) {
+          DEBUG_PRINTF("TM1637 Clock: MLB slot provider - parsed fav='%s' score=%d, opp='%s' score=%d\n",
+                 fav.c_str(), favScore, opp.c_str(), oppScore);
+        bool isFavHome = _instance->baseballApi->isFavoriteHomeTeam();
+        DEBUG_PRINTF("TM1637 Clock: MLB slot provider - isFavoriteHomeTeam()=%d\n", (int)isFavHome);
         _buildScoreText(favScore, oppScore, buf);
         DEBUG_PRINTF("TM1637 Clock: MLB slot provider pushing score '%s' (homeGame=%d)\n",
-                     buf, _instance->baseballApi->isFavoriteHomeTeam());
+                     buf, isFavHome);
       } else {
         // Parse failure — show unambiguous error marker
         strncpy(buf, "----", sizeof(buf));
-        DEBUG_PRINTLN(F("TM1637 Clock: MLB slot provider push parse-failure '----'"));
+        DEBUG_PRINTF("TM1637 Clock: MLB slot provider push parse-failure '----' for lastScore='%s'\n", lastScore.c_str());
       }
       uint16_t dur = tm1637DisplayGetSlotDurationMs();
       queue.push(SLOT_BASEBALL, dur, buf);

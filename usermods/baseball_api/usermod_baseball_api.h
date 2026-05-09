@@ -82,6 +82,7 @@ public:
   bool isGameLive() const { return gameLive; }
   const String& getLastScore() const { return lastScore; }
   const String& getFavoriteTeam() const { return favoriteTeam; }
+  String getFavoriteTeamResolvedName() const;
   bool isFavoriteHomeTeam() const { return favoriteIsHome; }
   bool isGameOverrideActive() const { return gameOverrideActive; }
 
